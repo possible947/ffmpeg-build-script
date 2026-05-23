@@ -18,9 +18,11 @@ MACOS_SILICON=false
 CONFIGURE_OPTIONS=()
 NONFREE_AND_GPL=false
 DISABLE_LV2=false
+ENABLE_LIBVMAF=false
 LATEST=false
 MANPAGES=1
 CURRENT_PACKAGE_VERSION=0
+RAV1E_MIN_RUSTC_VERSION="1.92"
 
 
 # Version comparison function
@@ -82,6 +84,12 @@ version_satisfies() {
     fi
 
     return 0
+}
+
+normalize_version() {
+  local version="$1"
+  # keep only numeric semver prefix (e.g. 1.92.0 from 1.92.0-nightly)
+  echo "$version" | sed -E 's/^([0-9]+(\.[0-9]+){1,2}).*/\1/'
 }
 
 command_exists() {
@@ -313,6 +321,7 @@ usage() {
   echo "      --version                  Display version information"
   echo "  -b, --build                    Starts the build process"
   echo "      --enable-gpl-and-non-free  Enable GPL and non-free codecs  - https://ffmpeg.org/legal.html"
+  echo "      --enable-libvmaf           Enable optional VMAF filter support"
   echo "      --disable-lv2              Disable LV2 libraries"
   echo "  -c, --cleanup                  Remove all working dirs"
   echo "      --latest                   Build latest version of dependencies if newer available"
@@ -322,6 +331,12 @@ usage() {
   echo "      --skip-install             Don't install FFmpeg, FFprobe, and FFplay binaries to your system"
   echo "      --auto-install             Install FFmpeg, FFprobe, and FFplay binaries to your system"
   echo "                                 Note: Without --skip-install or --auto-install the script will prompt you to install."
+  echo "Environment variables:"
+  echo "  NUMJOBS=<n>                    Override automatic parallel job detection"
+  echo "  SKIPINSTALL=yes                Skip post-build install prompt"
+  echo "  AUTOINSTALL=yes                Automatically install binaries after build"
+  echo "  VULKAN_SDK=<path>              Use an external Vulkan SDK (e.g. /opt/vulkansdk/<version>/<arch>)"
+  echo "  RAV1E_RUSTUP_TOOLCHAIN=<name>  Use this rustup toolchain for rav1e build (e.g. stable)"
   echo ""
 }
 
@@ -350,6 +365,9 @@ while (($# > 0)); do
     fi
     if [[ "$1" == "--disable-lv2" ]]; then
       DISABLE_LV2=true
+    fi
+    if [[ "$1" == "--enable-libvmaf" ]]; then
+      ENABLE_LIBVMAF=true
     fi
     if [[ "$1" == "--cleanup" || "$1" =~ '-c' && ! "$1" =~ '--' ]]; then
       cflag='-c'
@@ -419,6 +437,39 @@ mkdir -p "$WORKSPACE"
 export PATH="${WORKSPACE}/bin:$PATH"
 PKG_CONFIG_PATH="$WORKSPACE/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig"
 PKG_CONFIG_PATH+=":/usr/local/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/lib64/pkgconfig"
+
+if [ -n "$VULKAN_SDK" ]; then
+  if [ ! -d "$VULKAN_SDK" ]; then
+    echo "VULKAN_SDK path '$VULKAN_SDK' does not exist."
+    exit 1
+  fi
+
+  if [ ! -f "$VULKAN_SDK/include/vulkan/vulkan.h" ]; then
+    echo "VULKAN_SDK path '$VULKAN_SDK' does not contain include/vulkan/vulkan.h"
+    exit 1
+  fi
+
+  CFLAGS+=" -I$VULKAN_SDK/include"
+  if [ -d "$VULKAN_SDK/lib" ]; then
+    LDFLAGS+=" -L$VULKAN_SDK/lib"
+    PKG_CONFIG_PATH="$VULKAN_SDK/lib/pkgconfig:$PKG_CONFIG_PATH"
+  fi
+  if [ -d "$VULKAN_SDK/lib64" ]; then
+    LDFLAGS+=" -L$VULKAN_SDK/lib64"
+    PKG_CONFIG_PATH="$VULKAN_SDK/lib64/pkgconfig:$PKG_CONFIG_PATH"
+  fi
+  if [ -d "$VULKAN_SDK/bin" ]; then
+    export PATH="$VULKAN_SDK/bin:$PATH"
+  fi
+  if [ -n "$CMAKE_PREFIX_PATH" ]; then
+    export CMAKE_PREFIX_PATH="$VULKAN_SDK:$CMAKE_PREFIX_PATH"
+  else
+    export CMAKE_PREFIX_PATH="$VULKAN_SDK"
+  fi
+
+  echo "Using external Vulkan SDK from $VULKAN_SDK"
+fi
+
 export PKG_CONFIG_PATH
 
 if ! command_exists "make"; then
@@ -438,6 +489,8 @@ fi
 
 if ! command_exists "cargo"; then
   echo "cargo not installed. rav1e encoder will not be available."
+elif ! command_exists "rustc"; then
+  echo "rustc not installed. rav1e encoder will not be available."
 fi
 
 if ! command_exists "python3"; then
@@ -665,18 +718,67 @@ fi
 CONFIGURE_OPTIONS+=("--enable-libsvtav1")
 
 
-if command_exists "cargo"; then
-  if [[ ! "$SKIPRAV1E" == "yes" ]]; then
+RAV1E_ENABLED=false
+
+if pkg-config --exists rav1e 2>/dev/null; then
+  RAV1E_ENABLED=true
+fi
+
+if command_exists "cargo" && [[ ! "$SKIPRAV1E" == "yes" ]]; then
+  RAV1E_TOOLCHAIN_READY=false
+  RAV1E_CARGO_CMD=(cargo)
+
+  # Prefer explicit toolchain from user if provided.
+  if [ -n "$RAV1E_RUSTUP_TOOLCHAIN" ]; then
+    if ! command_exists "rustup"; then
+      echo "RAV1E_RUSTUP_TOOLCHAIN is set, but rustup is not installed. rav1e encoder will not be available."
+    else
+      execute rustup toolchain install "$RAV1E_RUSTUP_TOOLCHAIN"
+      RAV1E_TOOLCHAIN_VERSION=$(normalize_version "$(rustup run "$RAV1E_RUSTUP_TOOLCHAIN" rustc --version | awk '{print $2}')")
+      if version_satisfies "$RAV1E_TOOLCHAIN_VERSION" "$RAV1E_MIN_RUSTC_VERSION"; then
+        RAV1E_CARGO_CMD=(cargo "+$RAV1E_RUSTUP_TOOLCHAIN")
+        RAV1E_TOOLCHAIN_READY=true
+      else
+        echo "rustup toolchain '$RAV1E_RUSTUP_TOOLCHAIN' has rustc $RAV1E_TOOLCHAIN_VERSION, but rav1e requires rustc >= $RAV1E_MIN_RUSTC_VERSION."
+      fi
+    fi
+  elif command_exists "rustc"; then
+    RAV1E_SYSTEM_RUSTC_VERSION=$(normalize_version "$(rustc --version | awk '{print $2}')")
+    if version_satisfies "$RAV1E_SYSTEM_RUSTC_VERSION" "$RAV1E_MIN_RUSTC_VERSION"; then
+      RAV1E_TOOLCHAIN_READY=true
+    elif command_exists "rustup"; then
+      echo "System rustc $RAV1E_SYSTEM_RUSTC_VERSION is too old for rav1e (requires >= $RAV1E_MIN_RUSTC_VERSION). Trying rustup stable toolchain."
+      execute rustup toolchain install stable
+      RAV1E_STABLE_VERSION=$(normalize_version "$(rustup run stable rustc --version | awk '{print $2}')")
+      if version_satisfies "$RAV1E_STABLE_VERSION" "$RAV1E_MIN_RUSTC_VERSION"; then
+        RAV1E_CARGO_CMD=(cargo "+stable")
+        RAV1E_TOOLCHAIN_READY=true
+      else
+        echo "rustup stable rustc is $RAV1E_STABLE_VERSION, still below required $RAV1E_MIN_RUSTC_VERSION."
+      fi
+    else
+      echo "rustc $RAV1E_SYSTEM_RUSTC_VERSION is too old for rav1e and rustup is not installed. rav1e encoder will not be available."
+    fi
+  fi
+
+  if $RAV1E_TOOLCHAIN_READY; then
     if build "rav1e" "0.8.1"; then
-      echo "if you get the message 'cannot be built because it requires rustc x.xx or newer, try to run 'rustup update'"
-      execute cargo install cargo-c
+      execute "${RAV1E_CARGO_CMD[@]}" install cargo-c
       download "https://github.com/xiph/rav1e/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz"
-      export RUSTFLAGS="-C target-cpu=native"  
-      execute cargo cinstall --prefix="${WORKSPACE}" --libdir=lib --library-type=staticlib --crt-static --release
+      export RUSTFLAGS="-C target-cpu=native"
+      execute "${RAV1E_CARGO_CMD[@]}" cinstall --prefix="${WORKSPACE}" --libdir=lib --library-type=staticlib --crt-static --release
       build_done "rav1e" $CURRENT_PACKAGE_VERSION
     fi
-    CONFIGURE_OPTIONS+=("--enable-librav1e")
   fi
+fi
+
+if pkg-config --exists rav1e 2>/dev/null; then
+  RAV1E_ENABLED=true
+fi
+if $RAV1E_ENABLED; then
+  CONFIGURE_OPTIONS+=("--enable-librav1e")
+else
+  echo "rav1e is not available. FFmpeg will be built without --enable-librav1e."
 fi
 
 if $NONFREE_AND_GPL; then
@@ -857,6 +959,31 @@ if build "zimg" "3.0.6"; then
   build_done "zimg" $CURRENT_PACKAGE_VERSION
 fi
 CONFIGURE_OPTIONS+=("--enable-libzimg")
+
+if $ENABLE_LIBVMAF; then
+  if command_exists "python3" && command_exists "meson" && command_exists "ninja"; then
+    if build "libvmaf" "3.0.0"; then
+      download "https://github.com/Netflix/vmaf/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz" "vmaf-$CURRENT_PACKAGE_VERSION.tar.gz"
+      cd libvmaf || exit
+      execute meson setup build --prefix="${WORKSPACE}" --buildtype=release --default-library=static --libdir="${WORKSPACE}"/lib -Denable_tests=false -Denable_docs=false
+      execute ninja -C build
+      execute ninja -C build install
+      build_done "libvmaf" $CURRENT_PACKAGE_VERSION
+    fi
+
+    # Static libvmaf contains C++ objects (libsvm). FFmpeg configure probes with cc,
+    # so add the C++ runtime explicitly to avoid false "libvmaf not found" errors.
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      EXTRALIBS+=" -lc++"
+    else
+      EXTRALIBS+=" -lstdc++"
+    fi
+
+    CONFIGURE_OPTIONS+=("--enable-libvmaf")
+  else
+    echo "--enable-libvmaf was requested, but python3/meson/ninja are not available. Building FFmpeg without libvmaf support."
+  fi
+fi
 
 ##
 ## audio library
@@ -1162,17 +1289,27 @@ fi
 ## HWaccel library
 ##
 
-if build "vulkan-headers" "1.4.341.0"; then
-  download "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-$CURRENT_PACKAGE_VERSION.tar.gz" "Vulkan-Headers-$CURRENT_PACKAGE_VERSION.tar.gz"
-  execute cmake -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -B build/
-  cd build/ || exit
-  execute make install
-  build_done "vulkan-headers" $CURRENT_PACKAGE_VERSION
+if [ -z "$VULKAN_SDK" ]; then
+  if build "vulkan-headers" "1.4.341.0"; then
+    download "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-$CURRENT_PACKAGE_VERSION.tar.gz" "Vulkan-Headers-$CURRENT_PACKAGE_VERSION.tar.gz"
+    execute cmake -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -B build/
+    cd build/ || exit
+    execute make install
+    build_done "vulkan-headers" $CURRENT_PACKAGE_VERSION
+  fi
+else
+  echo "Using Vulkan headers from VULKAN_SDK. Skipping bundled Vulkan-Headers build."
 fi
 CONFIGURE_OPTIONS+=("--enable-vulkan")
 
 # vulkan filters and some encoders/decorders are implemented using shaders, for those we need a shader compiler
-if command_exists "python3"; then
+if [ -n "$VULKAN_SDK" ]; then
+  if pkg-config --exists glslang 2>/dev/null; then
+    CONFIGURE_OPTIONS+=("--enable-libglslang")
+  else
+    echo "glslang pkg-config entry not found in VULKAN_SDK. FFmpeg will be built without --enable-libglslang."
+  fi
+elif command_exists "python3"; then
   if build "glslang" "16.2.0"; then
     download "https://github.com/KhronosGroup/glslang/archive/refs/tags/$CURRENT_PACKAGE_VERSION.tar.gz" "glslang-$CURRENT_PACKAGE_VERSION.tar.gz"
     execute ./update_glslang_sources.py
@@ -1182,6 +1319,18 @@ if command_exists "python3"; then
     build_done "glslang" $CURRENT_PACKAGE_VERSION
   fi
   CONFIGURE_OPTIONS+=("--enable-libglslang")
+fi
+
+# Prefer glslangValidator for SPIR-V compilation. This avoids older system glslc
+# builds that cannot target Vulkan 1.4 and would disable encoders like prores_ks_vulkan.
+if command_exists "glslangValidator"; then
+  GLSLC_BIN=$(command -v glslangValidator)
+  CONFIGURE_OPTIONS+=("--glslc=$GLSLC_BIN")
+  echo "Using GLSL compiler: $GLSLC_BIN"
+elif command_exists "glslc"; then
+  echo "Using GLSL compiler from PATH: $(command -v glslc)"
+else
+  echo "No GLSL compiler found. Vulkan shader-based codecs/filters (including prores_ks_vulkan) may be unavailable."
 fi
 
 if [[ "$OSTYPE" == "linux-gnu" ]]; then
@@ -1279,6 +1428,14 @@ execute ./configure "${CONFIGURE_OPTIONS[@]}" \
   --pkg-config-flags="--static" \
   --prefix="${WORKSPACE}" \
   --extra-version="${EXTRA_VERSION}"
+
+if [ -f ffbuild/config.mak ]; then
+  if grep -q '^CONFIG_PRORES_KS_VULKAN_ENCODER=yes' ffbuild/config.mak; then
+    echo "prores_ks_vulkan encoder support: enabled"
+  else
+    echo "prores_ks_vulkan encoder support: disabled"
+  fi
+fi
 
 execute make -j "$MJOBS"
 execute make install

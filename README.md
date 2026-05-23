@@ -168,11 +168,46 @@ Options:
       --version                  Display version information
   -b, --build                    Starts the build process
       --enable-gpl-and-non-free  Enable non-free codecs  - https://ffmpeg.org/legal.html
+      --enable-libvmaf           Enable optional VMAF filter support
       --latest                   Build latest version of dependencies if newer available
   -c, --cleanup                  Remove all working dirs
       --small                    Prioritize small size over speed and usability; don't build manpages.
       --full-static              Complete static build of ffmpeg (eg. glibc, pthreads etc...) **only Linux**
                                  Note: Because of the NSS (Name Service Switch), glibc does not recommend static links.
+```
+
+`--enable-libvmaf` builds Netflix libvmaf and enables FFmpeg `libvmaf` filter support. This
+feature is optional and off by default. It requires `python3`, `meson`, and `ninja` to be
+available when building.
+
+For static builds (`--full-static`), libvmaf itself is built as a static library. Note that
+FFmpeg static linking still depends on your system toolchain and transitive dependencies.
+The script adds the C++ runtime (`-lstdc++` on Linux, `-lc++` on macOS) when VMAF is enabled.
+
+Common environment variables:
+
+```bash
+# Non-interactive build (no install prompt)
+SKIPINSTALL=yes ./build-ffmpeg --build
+
+# Override number of parallel jobs
+NUMJOBS=16 ./build-ffmpeg --build
+
+# Use external Vulkan SDK instead of bundled Vulkan-Headers/glslang build
+VULKAN_SDK=/opt/vulkansdk/<version>/<arch> ./build-ffmpeg --build
+
+# Force rav1e to build with a rustup toolchain (useful when system rustc is too old)
+RAV1E_RUSTUP_TOOLCHAIN=stable ./build-ffmpeg --build
+```
+
+For `prores_ks_vulkan`, ensure a GLSL/SPIR-V compiler is available. The script now prefers
+`glslangValidator` (from the bundled glslang build or SDK) to avoid older `glslc` toolchains
+that can disable Vulkan shader-based encoders during FFmpeg configure.
+
+You can verify support after build with:
+
+```bash
+./workspace/bin/ffmpeg -hide_banner -encoders | grep prores_ks_vulkan
 ```
 
 ### Notes on static linking
