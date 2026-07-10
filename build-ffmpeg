@@ -17,6 +17,7 @@ EXTRALIBS="-ldl -lpthread -lm -lz"
 MACOS_SILICON=false
 CONFIGURE_OPTIONS=()
 NONFREE_AND_GPL=false
+NATIVE_BUILD=false
 DISABLE_LV2=false
 ENABLE_LIBVMAF=false
 LATEST=false
@@ -323,6 +324,7 @@ usage() {
   echo "      --enable-gpl-and-non-free  Enable GPL and non-free codecs  - https://ffmpeg.org/legal.html"
   echo "      --enable-libvmaf           Enable optional VMAF filter support"
   echo "      --disable-lv2              Disable LV2 libraries"
+  echo "      --native                   Enable native CPU optimizations (-march=native -mtune=native)"
   echo "  -c, --cleanup                  Remove all working dirs"
   echo "      --latest                   Build latest version of dependencies if newer available"
   echo "      --small                    Prioritize small size over speed and usability; don't build manpages"
@@ -362,6 +364,9 @@ while (($# > 0)); do
       CONFIGURE_OPTIONS+=("--enable-nonfree")
       CONFIGURE_OPTIONS+=("--enable-gpl")
       NONFREE_AND_GPL=true
+    fi
+    if [[ "$1" == "--native" ]]; then
+      NATIVE_BUILD=true
     fi
     if [[ "$1" == "--disable-lv2" ]]; then
       DISABLE_LV2=true
@@ -426,6 +431,12 @@ if $NONFREE_AND_GPL; then
   echo "With GPL and non-free codecs"
 fi
 
+if $NATIVE_BUILD; then
+  echo "Building with native CPU optimizations (-march=native -mtune=native)"
+  CFLAGS+=" -march=native -mtune=native"
+  CXXFLAGS+=" -march=native -mtune=native"
+export CFLAGS CXXFLAGS
+fi
 
 if [ -n "$LDEXEFLAGS" ]; then
   echo "Start the build in full static mode."
@@ -1182,7 +1193,7 @@ if build "libjxl" "0.11.2"; then
   rm lib/jxl_threads.cmake
   mv lib/jxl_threads.cmake.patched lib/jxl_threads.cmake
   execute ./deps.sh
-  execute cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=off -DENABLE_STATIC=ON -DCMAKE_BUILD_TYPE=Release -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=OFF -DJPEGXL_ENABLE_JPEGLI=ON -DJPEGXL_TEST_TOOLS=OFF -DJPEGXL_ENABLE_JNI=OFF -DBUILD_TESTING=OFF -DJPEGXL_ENABLE_SKCMS=OFF .
+  execute cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=off -DENABLE_STATIC=ON -DCMAKE_BUILD_TYPE=Release -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_TOOLS=OFF -DJPEGXL_ENABLE_EXAMPLES=OFF -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=OFF -DJPEGXL_ENABLE_JPEGLI=ON -DJPEGXL_TEST_TOOLS=OFF -DJPEGXL_ENABLE_JNI=OFF -DBUILD_TESTING=OFF -DJPEGXL_ENABLE_SKCMS=OFF .
   execute make -j "$MJOBS"
   execute make install
   build_done "libjxl" $CURRENT_PACKAGE_VERSION
@@ -1196,7 +1207,7 @@ if build "libwebp" "1.6.0"; then
   download "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$CURRENT_PACKAGE_VERSION.tar.gz" "libwebp-$CURRENT_PACKAGE_VERSION.tar.gz"
   make_dir build
   cd build || exit
-  execute cmake -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWEBP_BUILD_CWEBP=OFF -DWEBP_BUILD_DWEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_IMG2WEBP=OFF -DWEBP_BUILD_VWEBP=OFF ../
+  execute cmake -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWEBP_BUILD_CWEBP=OFF -DWEBP_BUILD_DWEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_IMG2WEBP=OFF -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_BUILD_WEBPINFO=OFF -DWEBP_BUILD_WEBPMUX=OFF -DWEBP_BUILD_EXTRAS=OFF ../
   execute make -j "$MJOBS"
   execute make install
 
@@ -1237,6 +1248,44 @@ if build "VapourSynth" "73"; then
 fi
 
 CONFIGURE_OPTIONS+=("--enable-vapoursynth")
+
+# Recover from stale lockfiles: if libvmaf.done exists but pkg-config metadata is missing,
+# force a rebuild so FFmpeg can detect libvmaf.
+if [ -f "$PACKAGES/libvmaf.done" ] && [ ! -f "$WORKSPACE/lib/pkgconfig/libvmaf.pc" ]; then
+  rm -f "$PACKAGES/libvmaf.done"
+fi
+
+if build "libvmaf" "3.0.0"; then
+  download "https://github.com/Netflix/vmaf/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz" "vmaf-$CURRENT_PACKAGE_VERSION.tar.gz"
+  cd libvmaf || exit
+  if command_exists "meson" && command_exists "ninja"; then
+    mkdir build && cd build || exit
+    execute meson --prefix="${WORKSPACE}" --buildtype=release --default-library=static --libdir="${WORKSPACE}"/lib ..
+    execute ninja
+    execute ninja install
+  else
+    # Fallback to configure if meson is not available
+    execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static
+    execute make -j "$MJOBS"
+    execute make install
+  fi
+  build_done "libvmaf" $CURRENT_PACKAGE_VERSION
+fi
+
+if [[ "$OSTYPE" == "darwin"* ]] && [ -f "$WORKSPACE/lib/pkgconfig/libvmaf.pc" ]; then
+  if ! grep -q -- "-lc++" "$WORKSPACE/lib/pkgconfig/libvmaf.pc"; then
+    sed "s/^Libs: \(.*\)$/Libs: \1 -lc++/" "$WORKSPACE/lib/pkgconfig/libvmaf.pc" >"$WORKSPACE/lib/pkgconfig/libvmaf.pc.patched"
+    mv "$WORKSPACE/lib/pkgconfig/libvmaf.pc.patched" "$WORKSPACE/lib/pkgconfig/libvmaf.pc"
+  fi
+fi
+
+CONFIGURE_OPTIONS+=("--enable-libvmaf")
+
+if ! pkg-config --exists "libvmaf >= 2.0.0"; then
+  echo "Error: libvmaf >= 2.0.0 not found via pkg-config after build step."
+  echo "Checked path: $WORKSPACE/lib/pkgconfig/libvmaf.pc"
+  exit 1
+fi
 
 if $NONFREE_AND_GPL; then
   if build "srt" "1.5.4"; then
@@ -1301,6 +1350,10 @@ else
   echo "Using Vulkan headers from VULKAN_SDK. Skipping bundled Vulkan-Headers build."
 fi
 CONFIGURE_OPTIONS+=("--enable-vulkan")
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  CONFIGURE_OPTIONS+=("--enable-opencl")
+fi
 
 # vulkan filters and some encoders/decorders are implemented using shaders, for those we need a shader compiler
 if [ -n "$VULKAN_SDK" ]; then
