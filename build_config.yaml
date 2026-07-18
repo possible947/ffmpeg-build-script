@@ -1,0 +1,13 @@
+ffmpeg_version: '8.1'
+gpl_enabled: true
+native_build: true
+full_static: false
+enable_libvmaf: true
+disable_lv2: false
+num_jobs: auto
+macos:
+  clang: macports-clang-17
+  openmp: true
+linux:
+  c_standard: c11
+  cxx_standard: c++17
