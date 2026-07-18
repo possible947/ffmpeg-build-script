@@ -5,3 +5,13 @@ linux
 .artifacts
 build
 full-static-test.dockerfile
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+.mypy_cache/
+.pytest_cache/
