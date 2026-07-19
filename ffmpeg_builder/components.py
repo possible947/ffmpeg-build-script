@@ -296,6 +296,11 @@ class ComponentRegistry:
                     "--without-libintl-prefix",
                     "--disable-c++",
                 ],
+                platform_overrides={
+                    "linux": PlatformOverride(
+                        extra_cflags="-std=gnu11",
+                    ),
+                },
                 gpl_only=True,
             ),
             Component(
@@ -399,6 +404,17 @@ class ComponentRegistry:
                 ],
                 workdir="Build/linux",
                 archive_filename="svtav1-{version}.tar.gz",
+                platform_overrides={
+                    "linux": PlatformOverride(
+                        # SVT-AV1 4.0.1 includes <sched.h>/<pthread.h> from a header
+                        # (svt_threads.h) and relies on _GNU_SOURCE exposing
+                        # locale_t, clockid_t, posix_memalign, strcasecmp etc.
+                        # On modern glibc (2.43) with -std=c11 these GNU/POSIX
+                        # extensions are hidden by __STRICT_ANSI__, so the
+                        # build fails. Same workaround as the gettext override.
+                        extra_cflags="-std=gnu11",
+                    ),
+                },
                 ffmpeg_configure_flag="--enable-libsvtav1",
             ),
             Component(
@@ -407,7 +423,6 @@ class ComponentRegistry:
                 url="https://github.com/xiph/rav1e/archive/refs/tags/v{version}.tar.gz",
                 category=ComponentCategory.VIDEO_CODEC,
                 build_system=BuildSystem.CARGO,
-                custom_build_fn="build_rav1e",
                 requires_tools=["cargo", "rustc"],
                 ffmpeg_configure_flag="--enable-librav1e",
             ),
