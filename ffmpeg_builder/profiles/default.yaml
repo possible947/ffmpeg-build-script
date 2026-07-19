@@ -16,5 +16,5 @@ macos:
 
 # Linux specific settings
 linux:
-  c_standard: "c11"
+  c_standard: "gnu11"
   cxx_standard: "c++17"
