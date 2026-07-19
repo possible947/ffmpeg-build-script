@@ -2,20 +2,35 @@
 
 All notable changes to the FFmpeg Builder project.
 
-## [1.0.4] — 2026-07-19
+## [1.0.6] — 2026-07-19
 
 ### Fixed
 
-- **SVT-AV1 build** — Removed redundant `post_install` copy of `SvtAv1Enc.pc`; `make install` already installs it correctly
-- **rav1e rustc check** — Added `rustc` version check before installing `cargo-c`. If `rustc` is too old for the latest `cargo-c`, `rav1e` is now skipped instead of failing the build
-- **x265 build** — Fixed CMake source path (`../../../source`) and added copy of 10-bit/12-bit static libraries into the 8-bit build directory before linking, matching the original `build-ffmpeg` script
-- **aom (av1) extraction** — Added `archive_strip_components=0` because the aom archive from Google Source has no root directory
-- **aom (av1) out-of-source build** — Added `workdir="aom_build"` so CMake runs from a separate build directory, as required by aom
-- **executor stdin** — Fixed `subprocess.run` with `text=True` to pass string `input` instead of encoded bytes
-- **zimg libtoolize** — Falls back to system `libtoolize` when the workspace-built copy is not available
-- **nv-codec install prefix** — Added `PREFIX={workspace}` to `make` and `make install` so headers install into the workspace instead of `/usr/local`
-- **ffmpeg configure** — Removed unnecessary `-lcuda` and `-lvulkan` from `--extra-libs`; added `-L/usr/lib/wsl/lib` to `ldflags` on WSL2 so the linker can find `libcuda`
-- **cleanup command** — Fixed `clean` to reset the in-memory state via `StateManager.reset()`, preventing stale `build_state.json` from being recreated after cleanup
+- **svtav1 on GCC 16 / glibc 2.43** — SVT-AV1 4.0.1 includes `<sched.h>`/`<pthread.h>` from a project header (`Source/Lib/Codec/svt_threads.h`) and defines `_GNU_SOURCE` there. On modern glibc this is ignored when the translation unit is compiled with `-std=c11` because GCC defines `__STRICT_ANSI__`, which hides GNU/POSIX extensions (`locale_t`, `clockid_t`, `posix_memalign`, `strcasecmp`, etc.). Added a Linux `platform_overrides` entry that appends `-std=gnu11` to svtav1 CFLAGS, mirroring the existing `gettext` workaround. The same override is what the original `build-ffmpeg` script relies on
+- **Out-of-sync default C standard** — `ffmpeg_builder/build_config.yaml` still set `linux.c_standard: c11` despite the documented default in `profiles/default.yaml` and the [1.0.5] release notes already declaring `gnu11` as the default. The runtime state file (`workspace/build_state.json`) inherited the stale `c11` value, which is why the failing build used `-std=c11`. Synced `build_config.yaml` to `gnu11` so a fresh checkout also gets the working default
+- **x265 on GCC 15/16 / libstdc++** — `source/dynamicHDR10/json11/json11.cpp` uses `uint8_t` but only includes `<limits>`. Starting with libstdc++ shipped in GCC 15, `<limits>` no longer transitively pulls in `<cstdint>`, so `uint8_t` is undeclared and the 12-bit x265 build fails. Added a source patch in `build_x265()` that injects `#include <cstdint>` right after `<limits>`, matching the `sed -i '23a #include <cstdint>'` line from the original `build-ffmpeg` script
+- **FFmpeg configure: `libjxl_threads >= 0.7.0 not found`** — libjxl 0.11.2 ships a `libjxl_threads.pc` that omits `-lstdc++` from `Libs`/`Libs.private`, so FFmpeg's `require_pkg_config` link test fails with undefined references to `std::condition_variable`/`operator new`. Added `-lstdc++` to `extralibs` whenever `libjxl` is in the build set (Linux only; macOS already uses `-lc++` via the `libvmaf` branch). libjxl itself is a C++ library and the C++ runtime is needed for the threads runner even though the pkg-config file does not declare it
+- **FFmpeg configure: `SvtAv1Enc >= 0.9.0 not found` and vid.stab link error** — On Fedora/RHEL-family distributions, CMake's default `CMAKE_INSTALL_LIBDIR` is `lib64`, so SVT-AV1 4.0.1 and vid.stab install their libraries and pkg-config files to `<workspace>/lib64/` and `<workspace>/lib64/pkgconfig/`, but the builder only searched `<workspace>/lib/`. Added `<workspace>/lib64/pkgconfig` to `PKG_CONFIG_PATH` and `<workspace>/lib64` to `LDFLAGS` so FFmpeg's `require_pkg_config` resolves `SvtAv1Enc.pc` and the linker finds `libSvtAv1Enc.a` and `libvidstab.a`
+
+### Notes
+
+- **Target environment** — Debugging performed on Fedora Linux 44, dual AMD Instinct MI50, dual Intel Xeon Broadwell, GCC 16.1.1, glibc 2.43, Python 3.14. The svtav1 and x265 failures reproduce deterministically on this environment and are fixed by the changes above
+- **Successful Fedora 44 build** — Full FFmpeg 8.1 build (45/57 components, 12 LV2/OpenCL/AMF/VapourSynth-system items skipped on this environment) completed end-to-end on Fedora Linux 44 with GCC 16.1.1 and glibc 2.43. The resulting `ffmpeg` binary statically links `libsvtav1`, `libx264`, `libx265` (multi-bitdepth), `libaom`, `libdav1d`, `libjxl`, `libfdk_aac`, `libvpx`, `libmp3lame`, `libopus`, `libvorbis`, `libtheora`, `libsrt`, `libzmq`, `librav1e`, `libvmaf`, `libwebp`, `libfreetype`, `vid.stab`, `libssl`, `libcrypto`, `libsdl`, `libzmq`, `libopencore-amrnb/wb`, and all GPL/non-free codecs enabled. The build is the first verified run on this exact hardware (AMD Instinct MI50 + Intel Xeon Broadwell, Fedora 44)
+
+## [1.0.5] — 2026-07-19
+
+### Fixed
+
+- **Executable entry point** — Added `ffmpeg_builder/ffmpeg_builder` wrapper so the application can be launched directly without `python -m`
+- **gettext on GCC 16 / glibc 2.43** — Added Linux platform override that appends `-std=gnu11` to `gettext` CFLAGS. This works around `__builtin_va_arg_pack()` errors caused by the combination of `gettext 0.22.5`, GCC 16, and glibc 2.43
+- **Default Linux C standard** — Changed default `linux.c_standard` from `c11` to `gnu11` in `build_config.yaml` and `profiles/default.yaml` for broader compatibility with modern glibc headers
+- **GPU detection** — `system_info.gpu_info` was never populated; now detected via `lspci -nn` (with DRM sysfs fallback) so the system report shows the actual GPU models
+- **AMF detection on AMD GPUs** — AMF is now enabled when an AMD GPU is detected, because the `amf` component downloads the required headers from GPUOpen. Previously it was only enabled if system headers existed in `/usr/include/AMF`, which prevented AMF from being built on clean AMD systems
+- **Intel QSV false positive** — PCI vendor check now restricts matching to display/3D class devices only. Previously any Intel PCI device (chipset, USB, MEI, etc.) incorrectly enabled QSV, causing `onevpl` to be built on Xeon + AMD systems
+- **rav1e build function** — Removed non-existent `custom_build_fn="build_rav1e"`; rav1e now uses the generic `_build_cargo` path as intended
+- **Previous build progress display** — Fixed UI to show progress against `total_steps` (e.g., 13/57) instead of only the number of tracked components
+- **Platform override application** — Fixed `get_build_env()` condition from `component.name in component.platform_overrides` to `self.platform in component.platform_overrides`. Previously overrides (including the `gettext` `-std=gnu11` fix) were never applied
+- **OpenSSL on GCC 16** — OpenSSL `./Configure` forces `-std=c11` on x86_64, which breaks GCC 16's inline-assembly handling in `crypto/bn/asm/x86_64-gcc.c`. Added a post-configure patch that replaces `-std=c11` with `-std=gnu11` in `Makefile` and `configdata.pm`
 
 ### Notes
 

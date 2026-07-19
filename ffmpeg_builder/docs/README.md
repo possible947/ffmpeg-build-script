@@ -74,6 +74,8 @@ pip install -e .
 ./scripts/check_python_env.sh
 
 # Run the builder
+./ffmpeg_builder/ffmpeg_builder
+# or
 python -m ffmpeg_builder
 ```
 
@@ -121,7 +123,7 @@ macos:
   openmp: true
 
 linux:
-  c_standard: "c11"
+  c_standard: "gnu11"
   cxx_standard: "c++17"
 ```
 
@@ -184,7 +186,7 @@ The builder automatically detects available hardware acceleration and configures
 | **Vulkan** | Linux/macOS | pkg-config, headers, vulkaninfo |
 | **VAAPI** | Linux | pkg-config libva |
 | **Intel QSV** | Linux | vainfo or PCI Intel GPU (requires VAAPI, disabled in WSL2) |
-| **AMF** | Linux | Header paths in `/usr/include/AMF` |
+| **AMF** | Linux | AMD GPU detected via `lspci` or DRM sysfs; AMF headers are downloaded from GPUOpen |
 | **OpenCL** | Linux | Headers + ICD vendor files |
 | **VideoToolbox** | macOS | Always available |
 
@@ -239,6 +241,7 @@ The following environments have been verified to complete a full FFmpeg build:
 | Date | OS | Environment | Configuration | Result |
 |------|------|-------------|---------------|--------|
 | 2026-07-19 | Ubuntu 24.04 (WSL2) | x86_64, NVIDIA CUDA | GPL + non-free, native build | Successful build of FFmpeg 8.1 with all configured components enabled |
+| 2026-07-19 | Fedora Linux 44 | x86_64, dual AMD Instinct MI50, dual Intel Xeon Broadwell, GCC 16.1.1, glibc 2.43 | GPL + non-free, native build | Successful build of FFmpeg 8.1 (45/57 components; 12 LV2/OpenCL/Vulkan/AMF/VapourSynth items not built because the corresponding runtime libraries are not present on this system) |
 
 Build configuration for the verified run:
 
@@ -292,6 +295,18 @@ scripts/
 1. Check the log file: `workspace/logs/<component>_<step>.log`
 2. Use the interactive error handler to retry or skip
 3. Resume the build after fixing the issue
+
+### OpenSSL fails on GCC 15/16
+
+If OpenSSL fails with errors in `crypto/bn/asm/x86_64-gcc.c` (e.g. `expected ')' before ':' token`), the OpenSSL `./Configure` script has forced `-std=c11`. The builder now patches the generated `configdata.pm` and regenerates the `Makefile` with `-std=gnu11` automatically.
+
+### x265 fails with "uint8_t does not name a type" in `json11.cpp`
+
+On GCC 15/16 with the bundled libstdc++, `<limits>` no longer transitively pulls in `<cstdint>`, so `uint8_t` is undeclared in `source/dynamicHDR10/json11/json11.cpp`. The builder now injects `#include <cstdint>` after `#include <limits>` before configuring the build, matching the original `build-ffmpeg` script.
+
+### SVT-AV1 fails with "unknown type name 'locale_t' / 'clockid_t'"
+
+SVT-AV1 4.0.1 includes `<sched.h>`/`<pthread.h>` from a project header (`Source/Lib/Codec/svt_threads.h`) and defines `_GNU_SOURCE` there. On modern glibc this is ignored when compiled with `-std=c11` because GCC defines `__STRICT_ANSI__`. The builder applies a Linux `platform_overrides` entry that appends `-std=gnu11` to svtav1 CFLAGS, the same workaround already used for `gettext`.
 
 ### CUDA not detected
 
