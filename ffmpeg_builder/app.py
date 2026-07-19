@@ -1,15 +1,18 @@
 """Main application class for FFmpeg Builder."""
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from rich.console import Console
+from rich.live import Live
 
+from .components import Component
 from .config import ConfigManager, BuildConfig
 from .state import StateManager, ComponentStatus
 from .platform_detect import PlatformDetector
 from .system_report import SystemReportGenerator
 from .components import ComponentRegistry
 from .builder import FFmpegBuilder, BuildError, SkipComponent
-from .ui.screens import SystemReportScreen, ConfigScreen, BuildProgressScreen, FinalReportScreen
+from .ui.dashboard import BuildDashboard
+from .ui.screens import SystemReportScreen, ConfigScreen, InfoScreen, FinalReportScreen, HelpScreen
 from .ui.error_handler import ErrorHandler
 
 
@@ -39,8 +42,9 @@ class FFmpegBuilderApp:
 
         self.system_screen = SystemReportScreen(self.console)
         self.config_screen = ConfigScreen(self.console)
-        self.progress_screen = BuildProgressScreen(self.console)
+        self.info_screen = InfoScreen(self.console)
         self.final_screen = FinalReportScreen(self.console)
+        self.help_screen = HelpScreen(self.console)
         self.error_handler = ErrorHandler(self.console)
 
     def run(self) -> int:
@@ -53,8 +57,14 @@ class FFmpegBuilderApp:
             while True:
                 config = self.config_manager.get()
                 state = self.state_manager.load()
+                components = self._get_buildable_components(config)
 
-                action = self.system_screen.show(self.system_report, config, state)
+                action = self.system_screen.show(
+                    self.system_report,
+                    config,
+                    state,
+                    len(components),
+                )
 
                 if action == "build":
                     self._run_build(config, resume=False)
@@ -69,6 +79,12 @@ class FFmpegBuilderApp:
                     self.config_manager.save(config)
                 elif action == "cleanup":
                     self._cleanup()
+                elif action == "info":
+                    self.info_screen.show(components, self.registry.get_all())
+                    continue
+                elif action == "help":
+                    self.help_screen.show()
+                    continue
                 elif action == "exit":
                     return 0
 
@@ -82,16 +98,9 @@ class FFmpegBuilderApp:
             self.console.print(f"\n[red]Fatal error: {e}[/red]")
             return 1
 
-    def _run_build(self, config: BuildConfig, resume: bool = False) -> None:
-        """Run the build process.
-
-        Args:
-            config: Build configuration.
-            resume: Whether to resume from previous state.
-        """
+    def _get_buildable_components(self, config: BuildConfig) -> List[Component]:
         platform = "darwin" if self.platform_info.is_macos else "linux"
-
-        components = self.registry.get_buildable(
+        return self.registry.get_buildable(
             config.gpl_enabled,
             platform,
             self.tools,
@@ -100,13 +109,48 @@ class FFmpegBuilderApp:
             self.platform_info,
         )
 
+    def _run_build(self, config: BuildConfig, resume: bool = False) -> None:
+        """Run the build process.
+
+        Args:
+            config: Build configuration.
+            resume: Whether to resume from previous state.
+        """
+        all_components = self._get_buildable_components(config)
+        components = list(all_components)
+
         if resume:
-            state = self.state_manager.get()
             resume_point = self.state_manager.get_resume_point()
             if resume_point:
-                idx = next(i for i, c in enumerate(components) if c.name == resume_point)
+                idx = next((i for i, c in enumerate(components) if c.name == resume_point), 0)
                 components = components[idx:]
                 self.console.print(f"[green]Resuming from {resume_point}[/green]")
+        else:
+            self.state_manager.reset()
+
+        dashboard = BuildDashboard(
+            self.console,
+            config.ffmpeg_version,
+            self.platform_detector.get_num_jobs(config.num_jobs),
+            config.download_workers if config.async_downloads else 0,
+        )
+        dashboard.set_components(all_components)
+
+        def on_status(
+            name: str,
+            status: ComponentStatus,
+            version: Optional[str],
+            error_message: Optional[str],
+            detail: Optional[str] = None,
+        ) -> None:
+            dashboard.update_status(name, status, version, detail or "")
+            dashboard.log(f"{name} {status.value}")
+
+        def on_download_status(name: str, status: str) -> None:
+            dashboard.update_download_status(name, ComponentStatus(status))
+
+        def on_download_progress(name: str, downloaded: int, total: int) -> None:
+            dashboard.update_download_progress(name, downloaded, total)
 
         builder = FFmpegBuilder(
             config,
@@ -114,71 +158,48 @@ class FFmpegBuilderApp:
             self.packages,
             self.state_manager,
             self.platform_detector,
+            on_download_status,
+            dashboard.log,
+            on_download_progress,
         )
 
         state = self.state_manager.get()
         state.config = config.to_dict()
-        state.total_steps = len(components)
+        state.total_steps = len(all_components)
         self.state_manager.save()
 
-        builder.prefetch_downloads(components)
+        for name, component_state in state.components.items():
+            dashboard.update_status(name, component_state.status, component_state.version)
+            dashboard.reveal(name)
+
+        self.state_manager.status_listener = on_status
+        live: Optional[Live] = None
         success = True
         error_message = None
-
         idx = 1
+
         try:
+            builder.prefetch_downloads(components)
+            if self.console.is_terminal:
+                live = Live(dashboard, console=self.console, refresh_per_second=8, screen=True)
+                live.start()
+            else:
+                dashboard.log("Live dashboard disabled because output is not a terminal")
+
             while idx <= len(components):
                 component = components[idx - 1]
-                self.progress_screen.show(
-                    component.name,
-                    component.version,
-                    "Starting",
-                    idx,
-                    len(components),
-                )
+                state.current_step = all_components.index(component) + 1
+                self.state_manager.save()
 
                 try:
-                    self.progress_screen.show(
-                        component.name,
-                        component.version,
-                        "Downloading",
-                        idx,
-                        len(components),
-                    )
-
-                    self.progress_screen.show(
-                        component.name,
-                        component.version,
-                        "Configuring",
-                        idx,
-                        len(components),
-                    )
-
-                    self.progress_screen.show(
-                        component.name,
-                        component.version,
-                        "Building",
-                        idx,
-                        len(components),
-                    )
-
-                    self.progress_screen.show(
-                        component.name,
-                        component.version,
-                        "Installing",
-                        idx,
-                        len(components),
-                    )
-
                     builder.build_component(component)
-
-                    self.state_manager.mark_component_status(
-                        component.name,
-                        ComponentStatus.COMPLETED,
-                        component.version,
-                    )
-
-                    self.console.print(f"[green]✓ {component.name} {component.version}[/green]")
+                    current_state = self.state_manager.get().components.get(component.name)
+                    if current_state is None or current_state.status != ComponentStatus.SYSTEM:
+                        self.state_manager.mark_component_status(
+                            component.name,
+                            ComponentStatus.COMPLETED,
+                            component.version,
+                        )
                     idx += 1
 
                 except SkipComponent as e:
@@ -188,7 +209,6 @@ class FFmpegBuilderApp:
                         component.version,
                         str(e),
                     )
-                    self.console.print(f"[yellow]⊘ {component.name} skipped: {e.message}[/yellow]")
                     idx += 1
                     continue
 
@@ -201,11 +221,15 @@ class FFmpegBuilderApp:
                         str(e.log_file) if e.log_file else None,
                     )
 
+                    if live is not None:
+                        live.stop()
                     action = self.error_handler.handle_error(
                         component.name,
                         str(e),
                         e.log_file,
                     )
+                    if live is not None and action != "abort":
+                        live.start()
 
                     if action == "retry":
                         builder.retry_download(component)
@@ -215,20 +239,22 @@ class FFmpegBuilderApp:
                             component.version,
                         )
                         continue
-                    elif action == "skip":
+                    if action == "skip":
                         self.state_manager.mark_component_status(
                             component.name,
                             ComponentStatus.SKIPPED,
                             component.version,
                         )
-                        self.console.print(f"[yellow]⊘ {component.name} skipped[/yellow]")
                         idx += 1
                         continue
-                    elif action == "abort":
+                    if action == "abort":
                         success = False
                         error_message = str(e)
                         break
         finally:
+            if live is not None:
+                live.stop()
+            self.state_manager.status_listener = None
             builder.shutdown_downloads(wait=False)
 
         self.final_screen.show(

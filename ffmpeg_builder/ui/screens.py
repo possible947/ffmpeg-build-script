@@ -1,17 +1,44 @@
 """UI screens using rich library."""
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import List, Optional, Set
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich.prompt import Prompt, Confirm
-from rich.layout import Layout
-from rich.live import Live
 
+from ..components import Component
 from ..system_report import SystemReport
 from ..config import BuildConfig
 from ..state import BuildState, ComponentStatus
+
+
+_START_KEYS: List[tuple] = [
+    ("b", "Start new build", "Build all components from scratch (resets previous state)"),
+    ("r", "Resume previous build", "Continue from the last interrupted build"),
+    ("c", "Edit configuration", "Change build flags, jobs, async downloads"),
+    ("w", "Cleanup workspace", "Remove state, sources, and build artifacts"),
+    ("i", "Component info", "List all components (buildable + skipped)"),
+    ("h", "Help", "Show full key reference for all screens"),
+    ("q", "Exit", "Quit the application"),
+]
+
+_INFO_KEYS: List[tuple] = [
+    ("n", "Next page", "Show the next page of components"),
+    ("p", "Previous page", "Show the previous page of components"),
+    ("q", "Back", "Return to the system report"),
+]
+
+_ERROR_KEYS: List[tuple] = [
+    ("r", "Retry", "Re-attempt the failed step for this component"),
+    ("s", "Skip", "Mark the component as skipped and continue"),
+    ("a", "Abort", "Stop the build and return to the start screen"),
+    ("l", "Show full log", "Print the full log of the failed step"),
+]
+
+_DASHBOARD_KEYS: List[tuple] = [
+    ("—", "Live updates", "The dashboard refreshes automatically; no input required"),
+    ("Ctrl+C", "Interrupt", "Abort the build and return to the start screen"),
+]
 
 
 class UIScreen:
@@ -34,6 +61,7 @@ class SystemReportScreen(UIScreen):
         report: SystemReport,
         config: BuildConfig,
         state: Optional[BuildState] = None,
+        buildable_count: Optional[int] = None,
     ) -> str:
         """Show system report screen.
 
@@ -41,15 +69,15 @@ class SystemReportScreen(UIScreen):
             report: System report.
             config: Build configuration.
             state: Previous build state.
+            buildable_count: Number of buildable components.
 
         Returns:
-            User action: "build", "resume", "config", "cleanup", or "exit".
+            User action: "build", "resume", "config", "cleanup", "info", or "exit".
         """
         self.console.clear()
-        self.console.print("[bold blue]FFmpeg Builder - System Report[/bold blue]")
+        self.console.print(Panel.fit("[bold blue]FFmpeg Builder - System Report[/bold blue]", border_style="blue"))
         self.console.print()
 
-        # Hardware info
         hw_table = Table(title="Hardware", show_header=False)
         hw_table.add_column("Property", style="cyan")
         hw_table.add_column("Value")
@@ -59,9 +87,7 @@ class SystemReportScreen(UIScreen):
         if report.system_info.gpu_info:
             hw_table.add_row("GPU", ", ".join(report.system_info.gpu_info))
         self.console.print(hw_table)
-        self.console.print()
 
-        # Software info
         sw_table = Table(title="Software", show_header=False)
         sw_table.add_column("Property", style="cyan")
         sw_table.add_column("Value")
@@ -70,47 +96,28 @@ class SystemReportScreen(UIScreen):
             os_display = f"{report.system_info.os_name} {report.system_info.os_version}"
         if report.platform_info.is_wsl2:
             os_display += " (WSL2)"
+        compiler = report.get_compiler_info()
         sw_table.add_row("OS", os_display)
         sw_table.add_row("Architecture", report.system_info.architecture)
-
-        compiler = report.get_compiler_info()
         sw_table.add_row("Compiler", f"{compiler['compiler']} {compiler['version']}")
         self.console.print(sw_table)
-        self.console.print()
 
-        # Tools
-        tools_table = Table(title="Available Tools", show_header=True)
-        tools_table.add_column("Tool", style="cyan")
-        tools_table.add_column("Version")
-        tools_table.add_column("Status")
-
-        for name, tool in report.tools.items():
-            if tool.available:
-                status = "[green]Available[/green]"
-                version = tool.version or "N/A"
-            else:
-                status = "[red]Missing[/red]"
-                version = "-"
-            tools_table.add_row(name, version, status)
-
-        self.console.print(tools_table)
-        self.console.print()
-
-        # Hardware acceleration
+        available = sum(1 for t in report.tools.values() if t.available)
+        missing = sum(1 for t in report.tools.values() if not t.available)
+        tools_summary = f"{available}/{len(report.tools)} available"
+        if missing:
+            names = sorted(name for name, t in report.tools.items() if not t.available)
+            tools_summary += f" · missing: {', '.join(names)}"
+        tools_table = Table(title="Available Tools", show_header=False)
+        tools_table.add_column("Property", style="cyan")
+        tools_table.add_column("Value")
+        tools_table.add_row("Summary", tools_summary)
         hwaccel = report.get_hardware_acceleration_status()
         if hwaccel:
-            hwaccel_table = Table(title="Hardware Acceleration", show_header=True)
-            hwaccel_table.add_column("Type", style="cyan")
-            hwaccel_table.add_column("Status")
+            accel = ", ".join(name for name, ok in hwaccel.items() if ok)
+            tools_table.add_row("HW accel", accel or "none")
+        self.console.print(tools_table)
 
-            for name, available in hwaccel.items():
-                status = "[green]Available[/green]" if available else "[red]Not Available[/red]"
-                hwaccel_table.add_row(name, status)
-
-            self.console.print(hwaccel_table)
-            self.console.print()
-
-        # Build configuration
         config_table = Table(title="Build Configuration", show_header=False)
         config_table.add_column("Property", style="cyan")
         config_table.add_column("Value")
@@ -119,16 +126,20 @@ class SystemReportScreen(UIScreen):
         config_table.add_row("Native Build", "Yes" if config.native_build else "No")
         config_table.add_row("Full Static", "Yes" if config.full_static else "No")
         config_table.add_row("Parallel Jobs", str(config.num_jobs))
-        config_table.add_row("Async Downloads", "Yes" if config.async_downloads else "No")
-        config_table.add_row("Download Workers", str(config.download_workers))
+        config_table.add_row(
+            "Async Downloads",
+            f"Yes (workers: {config.download_workers})" if config.async_downloads else "No",
+        )
+        if buildable_count is not None:
+            config_table.add_row("Components", f"{buildable_count} buildable · press [i] for full list")
         self.console.print(config_table)
-        self.console.print()
 
-        # Previous build state
         if state:
-            completed = sum(1 for c in state.components.values() if c.status == ComponentStatus.COMPLETED)
+            completed = sum(
+                1 for c in state.components.values()
+                if c.status in (ComponentStatus.COMPLETED, ComponentStatus.SYSTEM)
+            )
             total = state.total_steps or len(state.components)
-
             state_table = Table(title="Previous Build", show_header=False)
             state_table.add_column("Property", style="cyan")
             state_table.add_column("Value")
@@ -136,33 +147,128 @@ class SystemReportScreen(UIScreen):
             state_table.add_row("Started", state.started_at)
             state_table.add_row("Progress", f"{completed}/{total} components")
             self.console.print(state_table)
-            self.console.print()
 
-        # Menu
-        self.console.print("[bold]Actions:[/bold]")
-        self.console.print("  [1] Start new build")
+        self.console.print()
+        actions_table = Table(
+            title="Actions (press key, then Enter)",
+            show_header=True,
+            header_style="bold cyan",
+            title_justify="left",
+        )
+        actions_table.add_column("Key", style="bold", no_wrap=True, width=4)
+        actions_table.add_column("Action", style="cyan", no_wrap=True, width=24)
+        actions_table.add_column("Description")
+        actions_table.add_row("b", "Start new build", "Build all components from scratch (resets previous state)")
+        actions_table.add_row("r", "Resume previous build", "Continue from the last interrupted build")
+        actions_table.add_row("c", "Edit configuration", "Change build flags, jobs, async downloads")
+        actions_table.add_row("w", "Cleanup workspace", "Remove state, sources, and build artifacts")
+        actions_table.add_row("i", "Component info", "List all components (buildable + skipped)")
+        actions_table.add_row("h", "Help", "Show full key reference for all screens")
+        actions_table.add_row("q", "Exit", "Quit the application")
+        self.console.print(actions_table)
+
+        choices = ["b", "c", "w", "i", "h", "q"]
         if state:
-            self.console.print("  [2] Resume previous build")
-        self.console.print("  [3] Edit configuration")
-        self.console.print("  [4] Cleanup workspace")
-        self.console.print("  [5] Exit")
-
-        choices = ["1", "3", "4", "5"]
-        if state:
-            choices = ["1", "2", "3", "4", "5"]
-
+            choices.insert(1, "r")
         choice = Prompt.ask("Choice", choices=choices)
 
-        if choice == "1":
-            return "build"
-        elif choice == "2":
-            return "resume"
-        elif choice == "3":
-            return "config"
-        elif choice == "4":
-            return "cleanup"
-        else:
-            return "exit"
+        if choice == "h":
+            return "help"
+
+        return {
+            "b": "build",
+            "r": "resume",
+            "c": "config",
+            "w": "cleanup",
+            "i": "info",
+            "q": "exit",
+        }[choice]
+
+
+class HelpScreen(UIScreen):
+    """Full key reference screen."""
+
+    def show(self) -> None:
+        """Show the help screen with keys for every screen."""
+        self.console.clear()
+        self.console.print(Panel.fit(
+            "[bold blue]FFmpeg Builder - Key Reference[/bold blue]",
+            border_style="blue",
+        ))
+        self.console.print()
+
+        sections = [
+            ("Start screen", _START_KEYS),
+            ("Component info screen", _INFO_KEYS),
+            ("Error prompt", _ERROR_KEYS),
+            ("Build dashboard", _DASHBOARD_KEYS),
+        ]
+        for title, keys in sections:
+            table = Table(title=title, show_header=True, header_style="bold cyan", title_justify="left")
+            table.add_column("Key", style="bold", no_wrap=True, width=10)
+            table.add_column("Action", style="cyan", no_wrap=True, width=22)
+            table.add_column("Description")
+            for key, action, desc in keys:
+                table.add_row(key, action, desc)
+            self.console.print(table)
+            self.console.print()
+
+        self.console.print("[dim]All key choices must be confirmed with Enter.[/dim]")
+        Prompt.ask("Press Enter to return")
+
+
+class InfoScreen(UIScreen):
+    """Component information screen."""
+
+    def show(self, buildable: List[Component], all_components: Optional[List[Component]] = None) -> None:
+        """Show paged component information."""
+        selected: Set[str] = {component.name for component in buildable}
+        components = all_components or buildable
+        page = 0
+        page_size = max(8, self.console.size.height - 10)
+        while True:
+            self.console.clear()
+            table = Table(title=f"FFmpeg Builder - Component Info ({len(buildable)} buildable)", expand=True)
+            table.add_column("#", justify="right", width=4)
+            table.add_column("Name", style="cyan")
+            table.add_column("Version")
+            table.add_column("Category")
+            table.add_column("Notes")
+            start = page * page_size
+            end = min(len(components), start + page_size)
+            for index, component in enumerate(components[start:end], start + 1):
+                notes = []
+                if component.system_component:
+                    notes.append("system")
+                if component.name not in selected:
+                    notes.append("not selected")
+                table.add_row(
+                    str(index),
+                    component.name,
+                    component.version,
+                    component.category.value,
+                    ", ".join(notes),
+                    style=None if component.name in selected else "dim",
+                )
+            self.console.print(table)
+            self.console.print()
+
+            hint = "[n] Next  [p] Previous  [h] Help  [q] Back"
+            self.console.print(hint)
+            choices = ["q", "h"]
+            if end < len(components):
+                choices.append("n")
+            if page > 0:
+                choices.append("p")
+            choice = Prompt.ask("Choice", choices=choices)
+            if choice == "q":
+                return
+            if choice == "n":
+                page += 1
+            elif choice == "p":
+                page -= 1
+            elif choice == "h":
+                HelpScreen(self.console).show()
 
 
 class ConfigScreen(UIScreen):
@@ -181,46 +287,14 @@ class ConfigScreen(UIScreen):
         self.console.print("[bold blue]Edit Build Configuration[/bold blue]")
         self.console.print()
 
-        # GPL
-        if Confirm.ask("Enable GPL and non-free codecs?", default=config.gpl_enabled):
-            config.gpl_enabled = True
-        else:
-            config.gpl_enabled = False
-
-        # Native build
-        if Confirm.ask("Enable native CPU optimizations?", default=config.native_build):
-            config.native_build = True
-        else:
-            config.native_build = False
-
-        # Full static
-        if Confirm.ask("Build full static binary (Linux only)?", default=config.full_static):
-            config.full_static = True
-        else:
-            config.full_static = False
-
-        # libvmaf
-        if Confirm.ask("Enable libvmaf?", default=config.enable_libvmaf):
-            config.enable_libvmaf = True
-        else:
-            config.enable_libvmaf = False
-
-        # LV2
-        if Confirm.ask("Disable LV2 libraries?", default=config.disable_lv2):
-            config.disable_lv2 = True
-        else:
-            config.disable_lv2 = False
-
-        # Parallel jobs
+        config.gpl_enabled = Confirm.ask("Enable GPL and non-free codecs?", default=config.gpl_enabled)
+        config.native_build = Confirm.ask("Enable native CPU optimizations?", default=config.native_build)
+        config.full_static = Confirm.ask("Build full static binary (Linux only)?", default=config.full_static)
+        config.enable_libvmaf = Confirm.ask("Enable libvmaf?", default=config.enable_libvmaf)
+        config.disable_lv2 = Confirm.ask("Disable LV2 libraries?", default=config.disable_lv2)
         jobs = Prompt.ask("Number of parallel jobs", default=str(config.num_jobs))
         config.num_jobs = jobs
-
-        # Async downloads
-        if Confirm.ask("Enable async source downloads?", default=config.async_downloads):
-            config.async_downloads = True
-        else:
-            config.async_downloads = False
-
+        config.async_downloads = Confirm.ask("Enable async source downloads?", default=config.async_downloads)
         workers = Prompt.ask("Number of download workers", default=str(config.download_workers))
         config.download_workers = int(workers)
 
@@ -229,40 +303,6 @@ class ConfigScreen(UIScreen):
         Prompt.ask("Press Enter to continue")
 
         return config
-
-
-class BuildProgressScreen(UIScreen):
-    """Build progress screen."""
-
-    def show(
-        self,
-        component_name: str,
-        component_version: str,
-        step: str,
-        current: int,
-        total: int,
-    ) -> None:
-        """Show build progress.
-
-        Args:
-            component_name: Current component name.
-            component_version: Component version.
-            step: Current step.
-            current: Current component index.
-            total: Total components.
-        """
-        self.console.clear()
-        self.console.print("[bold blue]Building FFmpeg[/bold blue]")
-        self.console.print()
-
-        progress_table = Table(show_header=False)
-        progress_table.add_column("Property", style="cyan")
-        progress_table.add_column("Value")
-        progress_table.add_row("Progress", f"{current}/{total}")
-        progress_table.add_row("Component", f"{component_name} {component_version}")
-        progress_table.add_row("Step", step)
-
-        self.console.print(progress_table)
 
 
 class FinalReportScreen(UIScreen):
@@ -292,8 +332,8 @@ class FinalReportScreen(UIScreen):
 
         self.console.print()
 
-        # Summary
         completed = [name for name, c in state.components.items() if c.status == ComponentStatus.COMPLETED]
+        system = [name for name, c in state.components.items() if c.status == ComponentStatus.SYSTEM]
         failed = [name for name, c in state.components.items() if c.status == ComponentStatus.FAILED]
         skipped = [name for name, c in state.components.items() if c.status == ComponentStatus.SKIPPED]
 
@@ -301,13 +341,13 @@ class FinalReportScreen(UIScreen):
         summary_table.add_column("Status", style="cyan")
         summary_table.add_column("Count")
         summary_table.add_row("[green]Completed[/green]", str(len(completed)))
+        summary_table.add_row("[cyan]System[/cyan]", str(len(system)))
         summary_table.add_row("[red]Failed[/red]", str(len(failed)))
         summary_table.add_row("[yellow]Skipped[/yellow]", str(len(skipped)))
         self.console.print(summary_table)
         self.console.print()
 
         if success:
-            # Binaries
             bin_dir = workspace / "bin"
             binaries = ["ffmpeg", "ffprobe", "ffplay"]
 
@@ -325,12 +365,10 @@ class FinalReportScreen(UIScreen):
             self.console.print(bin_table)
             self.console.print()
 
-            # Install prompt
             if Confirm.ask("Install binaries to system?", default=False):
                 self._install_binaries(bin_dir)
 
         else:
-            # Error details
             if error_message:
                 self.console.print(Panel(
                     error_message,
@@ -339,7 +377,6 @@ class FinalReportScreen(UIScreen):
                 ))
                 self.console.print()
 
-            # Failed components
             if failed:
                 failed_table = Table(title="Failed Components", show_header=True)
                 failed_table.add_column("Component", style="cyan")

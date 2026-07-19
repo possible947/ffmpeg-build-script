@@ -69,8 +69,11 @@ Key methods:
 | Method | Description |
 |--------|-------------|
 | `run()` | Main loop — shows screens, dispatches actions |
-| `_run_build(config, resume)` | Build loop with retry/skip/abort error handling |
+| `_run_build(config, resume)` | Build loop with retry/skip/abort error handling and Live dashboard lifecycle |
+| `_get_buildable_components(config)` | Resolve the component set shared by build and info screens |
 | `_cleanup()` | Remove workspace, packages, and state file |
+
+The build session owns a `BuildDashboard` renderable in `ui/dashboard.py`. `StateManager.status_listener` forwards builder status updates to the dashboard, and `AsyncDownloadManager` uses callback hooks for background download row updates. `Live(..., screen=True)` is active only during the build loop; it is stopped before interactive error prompts and final reports.
 
 Build loop logic:
 
@@ -134,7 +137,7 @@ class BuildState:
 ```python
 @dataclass
 class ComponentState:
-    status: ComponentStatus     # pending/downloading/configuring/building/installing/completed/failed/skipped
+    status: ComponentStatus     # pending/system/downloading/configuring/building/installing/completed/failed/skipped
     version: str
     built_at: str
     error_message: str
@@ -330,16 +333,21 @@ class Component:
 
 `FFmpegBuilder` exposes this as `prefetch_downloads()`, `retry_download()`, and `shutdown_downloads()`. The build loop in `app.py` calls `prefetch_downloads()` once before the loop, `retry_download()` on retry, and `shutdown_downloads()` in a `finally` block.
 
-### `ui/screens.py` — TUI Screens
+### `ui/screens.py` and `ui/dashboard.py` — TUI Screens
 
-Built with the `rich` library. Four screens:
+Built with the `rich` library. Static screens use `Table`, `Panel`, and `Prompt`; the build screen uses `Live` with `BuildDashboard`.
 
 | Screen | Class | Purpose |
 |--------|-------|---------|
-| System Report | `SystemReportScreen` | Hardware/software tables, HW accel status, config, menu |
+| System Report | `SystemReportScreen` | Hardware/software tables, HW accel status, config, letter-key menu |
+| Component Info | `InfoScreen` | Paged buildable/all component list |
 | Configuration | `ConfigScreen` | Interactive yes/no prompts for build settings |
-| Build Progress | `BuildProgressScreen` | Current component, step, progress counter |
+| Build Dashboard | `BuildDashboard` | Live component rows, status colors, incremental row reveal, in-progress row pinning, message log |
 | Final Report | `FinalReportScreen` | Summary, binaries, install prompt, error details |
+
+`BuildDashboard` receives updates from `StateManager.status_listener`, per-component download progress callbacks (`update_download_progress`), and async download status callbacks. Worker threads only update the dashboard model under a lock; Rich rendering happens from the main Live refresh loop. Rows are revealed (`first_seen`) lazily as the first event for a component arrives — on a fresh build this means rows appear when `prefetch_downloads` queues each archive, on a resume the rows present in `state.components` are revealed eagerly so the prior progress is visible from the first frame. The viewport in `_visible_rows` always includes every in-progress row (download/configure/build/install) and fills the remaining height with rows around the active component, so the user always sees what is currently happening even on a 30-row terminal.
+
+`mark_component_status` accepts a transient `detail` argument (not persisted to `workspace/build_state.json`) that is forwarded to the listener so the dashboard can show the running command (e.g. `make -j40`, `cmake`, `ninja -C build`, `cargo cinstall`) or live download progress (`12.3/45.7 MB (27%)`). When adding a new build helper, always pass `detail="…"` on every transition so the dashboard column stays meaningful.
 
 ### `ui/error_handler.py` — Error Handling
 
@@ -347,8 +355,8 @@ Built with the `rich` library. Four screens:
 
 1. Shows error panel with component name and message
 2. Displays last 20 lines of the log file
-3. Presents menu: Retry / Skip / Abort / Show Full Log
-4. Returns user choice to the build loop in `app.py`
+3. Presents letter-key menu: Retry (`r`) / Skip (`s`) / Abort (`a`) / Show Full Log (`l`)
+4. Returns user choice to the build loop in `app.py` after Live has been stopped
 
 ## Data Flow
 

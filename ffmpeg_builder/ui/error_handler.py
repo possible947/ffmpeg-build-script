@@ -3,8 +3,8 @@ from pathlib import Path
 from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 from rich.prompt import Prompt
+from rich.table import Table
 
 
 class ErrorHandler:
@@ -48,7 +48,6 @@ class ErrorHandler:
             try:
                 with open(log_file, "r", encoding="utf-8") as f:
                     lines = f.readlines()
-                
                 last_lines = lines[-20:] if len(lines) > 20 else lines
                 self.console.print("\n[bold]Last 20 lines of log:[/bold]")
                 self.console.print("".join(last_lines), style="dim")
@@ -57,22 +56,40 @@ class ErrorHandler:
         
         while True:
             self.console.print("\n[bold]What would you like to do?[/bold]")
-            self.console.print("  [1] Retry build")
-            self.console.print("  [2] Skip this component")
-            self.console.print("  [3] Abort build")
+            self.console.print("  [r] Retry build")
+            self.console.print("  [s] Skip this component")
+            self.console.print("  [a] Abort build")
             if log_file:
-                self.console.print("  [4] Show full log")
-            
-            choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"] if log_file else ["1", "2", "3"])
-            
-            if choice == "1":
+                self.console.print("  [l] Show full log")
+            self.console.print("  [h] Show key reference")
+
+            choices = ["r", "s", "a", "h"]
+            if log_file:
+                choices.append("l")
+            choice = Prompt.ask("Choice", choices=choices)
+
+            if choice == "r":
                 return "retry"
-            elif choice == "2":
+            if choice == "s":
                 return "skip"
-            elif choice == "3":
+            if choice == "a":
                 return "abort"
-            elif choice == "4" and log_file:
+            if choice == "l" and log_file:
                 self._show_full_log(log_file)
+            if choice == "h":
+                self._show_help()
+
+    def _show_help(self) -> None:
+        """Show the key reference for the error prompt."""
+        from .screens import _ERROR_KEYS
+
+        table = Table(title="Error prompt keys", show_header=True, header_style="bold cyan", title_justify="left")
+        table.add_column("Key", style="bold", no_wrap=True, width=10)
+        table.add_column("Action", style="cyan", no_wrap=True, width=22)
+        table.add_column("Description")
+        for key, action, desc in _ERROR_KEYS:
+            table.add_row(key, action, desc)
+        self.console.print(table)
     
     def _show_full_log(self, log_file: Path) -> None:
         """Show full log file.

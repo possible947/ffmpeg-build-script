@@ -6,7 +6,7 @@ FFmpeg Builder replaces the traditional bash `build-ffmpeg` script with a modern
 
 ## Features
 
-- **Interactive TUI** — Rich terminal interface with system report, configuration editor, and build progress screens
+- **Interactive TUI** — Rich terminal interface with system report, component info, configuration editor, and live package-manager style build dashboard
 - **Platform Detection** — Automatic detection of CPU, RAM, GPU, compilers, and build tools
 - **Hardware Acceleration** — Detects and configures CUDA, Vulkan, VAAPI, AMF, and OpenCL support
 - **Resumable Builds** — JSON state file tracks progress; interrupted builds can be resumed
@@ -96,15 +96,21 @@ The application starts with a **System Report** screen showing:
 - Hardware acceleration status (CUDA, Vulkan, VAAPI, AMF, OpenCL)
 - Current build configuration
 
-From the main menu you can:
+From the main menu, type a letter key and press Enter:
 
-| Action | Description |
-|--------|-------------|
-| **Start new build** | Begin building all components from scratch |
-| **Resume previous build** | Continue from the last interrupted build |
-| **Edit configuration** | Modify build settings interactively |
-| **Cleanup workspace** | Remove all build artifacts and state |
-| **Exit** | Exit the application |
+| Key | Action | Description |
+|-----|--------|-------------|
+| `b` | **Start new build** | Begin building all components from scratch (resets previous state) |
+| `r` | **Resume previous build** | Continue from the last interrupted build when state exists |
+| `c` | **Edit configuration** | Modify build settings interactively |
+| `w` | **Cleanup workspace** | Remove all build artifacts and state |
+| `i` | **Component info** | Show the current buildable component set and non-selected components |
+| `h` | **Help** | Show the full key reference for all screens (start, info, error prompt, dashboard) |
+| `q` | **Exit** | Exit the application |
+
+During a build, the live dashboard shows a fixed header (FFmpeg version, complete/system/failed/skip/active/downloading counts, elapsed time, jobs, async DL workers), a per-component table with `n/total`, name, version, status (`pending`/`system`/`downloading`/`config`/`build`/`install`/`complete`/`fail`/`skip`), a coarse step bar, and a Detail column showing the running command (e.g. `make -j40`) or live download progress (e.g. `12.3/45.7 MB (27%)`). Rows appear as downloads are queued and builds start (not pre-populated), in-progress rows are pinned in the viewport, and a service message log appears at the bottom. All status colors follow the same legend: complete green, build magenta, config yellow, downloading/system cyan, install blue, fail red, skip yellow dim, pending dim.
+
+On failure, type `r` to retry, `s` to skip, `a` to abort, or `l` to view the full log when available.
 
 ### Configuration
 
@@ -283,7 +289,8 @@ ffmpeg_builder/
     executor.py              Subprocess wrapper with logging
     downloader.py            File downloads with progress (requests + tqdm)
     ui/
-        screens.py           TUI screens: system report, config, build, final
+        screens.py           TUI screens: system report, config, info, final
+        dashboard.py         Live build dashboard (header / table / messages)
         error_handler.py     Interactive error handling (retry/skip/abort)
     profiles/
         default.yaml         Default build profile

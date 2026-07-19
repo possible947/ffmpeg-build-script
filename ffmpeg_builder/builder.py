@@ -56,6 +56,9 @@ class FFmpegBuilder:
         packages: Path,
         state_manager: StateManager,
         platform_detector: PlatformDetector,
+        on_download_status: Optional[Callable[[str, str], None]] = None,
+        on_log: Optional[Callable[[str], None]] = None,
+        on_download_progress: Optional[Callable[[str, int, int], None]] = None,
     ):
         """Initialize builder.
 
@@ -65,6 +68,10 @@ class FFmpegBuilder:
             packages: Packages directory.
             state_manager: State manager instance.
             platform_detector: Platform detector instance.
+            on_download_status: Optional download status callback.
+            on_log: Optional message callback.
+            on_download_progress: Optional per-component download progress
+                callback receiving (component_name, downloaded_bytes, total_bytes).
         """
         self.config = config
         self.workspace = workspace.absolute()
@@ -74,11 +81,17 @@ class FFmpegBuilder:
 
         self.executor = CommandExecutor(self.workspace)
         self.downloader = Downloader(self.packages)
+        self.on_download_status = on_download_status
+        self.on_log = on_log
+        self.on_download_progress = on_download_progress
         self.async_download_manager = None
         if config.async_downloads:
             self.async_download_manager = AsyncDownloadManager(
                 self.downloader,
                 config.download_workers,
+                on_download_status,
+                on_log,
+                on_download_progress,
             )
         self.registry = ComponentRegistry()
 
@@ -217,6 +230,8 @@ class FFmpegBuilder:
             prefetch_components.append(component)
 
         self.async_download_manager.prefetch(prefetch_components)
+        if self.on_log is not None and prefetch_components:
+            self.on_log(f"Prefetch queued {len(prefetch_components)} archives")
 
     def retry_download(self, component: Component) -> None:
         """Retry a background download for a component.
@@ -295,7 +310,7 @@ class FFmpegBuilder:
             if self._is_system_component_available(component.system_tool_name):
                 self.state_manager.mark_component_status(
                     component.name,
-                    ComponentStatus.COMPLETED,
+                    ComponentStatus.SYSTEM,
                     component.version,
                 )
                 return
@@ -304,12 +319,19 @@ class FFmpegBuilder:
             component.name,
             ComponentStatus.DOWNLOADING,
             component.version,
+            detail="queued" if self.async_download_manager is not None else "starting",
         )
 
         archive_path = self._download_and_extract(component)
         source_dir = self.packages / component.get_target_dir()
 
         if component.build_system == BuildSystem.HEADERS_ONLY:
+            self.state_manager.mark_component_status(
+                component.name,
+                ComponentStatus.INSTALLING,
+                component.version,
+                detail="install headers",
+            )
             self._install_headers_only(component, source_dir)
             self._execute_post_install(component, source_dir)
             return
@@ -318,6 +340,7 @@ class FFmpegBuilder:
             component.name,
             ComponentStatus.CONFIGURING,
             component.version,
+            detail=self._configure_detail(component),
         )
 
         if component.custom_build_fn:
@@ -341,6 +364,21 @@ class FFmpegBuilder:
             raise BuildError(component.name, f"Unknown build system: {component.build_system}")
 
         self._execute_post_install(component, source_dir)
+
+    def _configure_detail(self, component: Component) -> str:
+        """Return a short human-readable description of the configure step."""
+        system = component.build_system
+        if system == BuildSystem.AUTOTOOLS:
+            return "./configure"
+        if system == BuildSystem.CMAKE:
+            return "cmake"
+        if system == BuildSystem.MESON:
+            return "meson setup"
+        if system == BuildSystem.MAKE_ONLY:
+            return "make"
+        if system == BuildSystem.CARGO:
+            return "cargo"
+        return ""
 
     def _execute_post_install(self, component: Component, source_dir: Path) -> None:
         """Execute post-install commands if defined.
@@ -427,7 +465,13 @@ class FFmpegBuilder:
 
         try:
             if self.async_download_manager is None:
-                archive_path = self.downloader.download(url, filename)
+                if self.on_download_status is not None:
+                    self.on_download_status(component.name, "downloading")
+                archive_path = self.downloader.download(
+                    url,
+                    filename,
+                    show_progress=self.on_download_status is None,
+                )
             else:
                 archive_path = self.async_download_manager.get(component)
         except Exception as e:
@@ -484,6 +528,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            detail=f"make -j{self.num_jobs}",
+        )
+
         result, log_file = self.executor.execute_make(
             build_dir,
             self.num_jobs,
@@ -498,6 +549,7 @@ class FFmpegBuilder:
             component.name,
             ComponentStatus.INSTALLING,
             component.version,
+            detail="make install",
         )
 
         result, log_file = self.executor.execute_install(
@@ -539,6 +591,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "CMake configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            detail="make -j" + str(self.num_jobs),
+        )
+
         result, log_file = self.executor.execute_make(
             build_dir,
             self.num_jobs,
@@ -553,6 +612,7 @@ class FFmpegBuilder:
             component.name,
             ComponentStatus.INSTALLING,
             component.version,
+            detail="make install",
         )
 
         result, log_file = self.executor.execute_with_log(
@@ -594,6 +654,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Meson configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            detail="ninja -C build",
+        )
+
         result, log_file = self.executor.execute_with_log(
             ["ninja", "-C", "build"],
             component.name,
@@ -609,6 +676,7 @@ class FFmpegBuilder:
             component.name,
             ComponentStatus.INSTALLING,
             component.version,
+            detail="ninja install",
         )
 
         result, log_file = self.executor.execute_with_log(
@@ -635,6 +703,13 @@ class FFmpegBuilder:
 
         env = self.get_build_env(component)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            detail="make -j" + str(self.num_jobs),
+        )
+
         build_args = [
             arg.replace("{workspace}", str(self.workspace.absolute()))
             for arg in component.build_args
@@ -655,6 +730,7 @@ class FFmpegBuilder:
             component.name,
             ComponentStatus.INSTALLING,
             component.version,
+            detail="make install",
         )
 
         install_args = [
@@ -712,6 +788,13 @@ class FFmpegBuilder:
                 f"cargo-c requires rustc 1.95 or newer"
             )
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            detail="cargo install cargo-c",
+        )
+
         result, log_file = self.executor.execute_with_log(
             ["cargo", "install", "cargo-c"],
             component.name,
@@ -722,6 +805,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Failed to install cargo-c", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+            detail="cargo cinstall",
+        )
 
         result, log_file = self.executor.execute_with_log(
             [
@@ -795,6 +885,13 @@ class FFmpegBuilder:
             )
             makefile.write_text(content)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             1,
@@ -804,6 +901,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_with_log(
             ["make", f"PREFIX={self.workspace.absolute()}", "install"],
@@ -871,6 +975,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install_sw',
+        )
+
         result, log_file = self.executor.execute_with_log(
             ["make", "install_sw"],
             component.name,
@@ -911,6 +1022,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -920,6 +1038,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1025,6 +1150,13 @@ class FFmpegBuilder:
             if not result.success:
                 raise BuildError(component.name, f"Configure {bitdepth} failed", log_file)
 
+            self.state_manager.mark_component_status(
+                component.name,
+                ComponentStatus.BUILDING,
+                component.version,
+            detail='make -jself.num_jobs (multi-bitdepth)',
+            )
+
             result, log_file = self.executor.execute_make(
                 bitdepth_dir,
                 self.num_jobs,
@@ -1070,6 +1202,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Merge libs failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             eight_dir,
@@ -1123,6 +1262,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1132,6 +1278,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1195,6 +1348,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1204,6 +1364,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1259,6 +1426,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1268,6 +1442,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1331,6 +1512,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1340,6 +1528,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1383,6 +1578,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            "ninja -C build",
+        )
+
         result, log_file = self.executor.execute_with_log(
             ["ninja", "-C", "build"],
             component.name,
@@ -1393,6 +1595,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+            "ninja install",
+        )
 
         result, log_file = self.executor.execute_with_log(
             ["ninja", "-C", "build", "install"],
@@ -1438,6 +1647,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_with_log(
             ["make", "install"],
@@ -1489,6 +1705,13 @@ class FFmpegBuilder:
             )
             proxy_cpp.write_text(content)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+            f"make -j{self.num_jobs}",
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1498,6 +1721,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+            "make install",
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1546,6 +1776,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1555,6 +1792,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,
@@ -1574,6 +1818,13 @@ class FFmpegBuilder:
         """
         env = self.get_build_env(component)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='./configure.py --bootstrap',
+        )
+
         result, log_file = self.executor.execute_with_log(
             ["./configure.py", "--bootstrap"],
             component.name,
@@ -1584,6 +1835,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Bootstrap failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='install ninja',
+        )
 
         ninja_bin = source_dir / "ninja"
         dest = self.workspace / "bin" / "ninja"
@@ -1693,6 +1951,13 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
 
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.BUILDING,
+            component.version,
+        detail='make -jself.num_jobs',
+        )
+
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -1702,6 +1967,13 @@ class FFmpegBuilder:
 
         if not result.success:
             raise BuildError(component.name, "Build failed", log_file)
+
+        self.state_manager.mark_component_status(
+            component.name,
+            ComponentStatus.INSTALLING,
+            component.version,
+        detail='make install',
+        )
 
         result, log_file = self.executor.execute_install(
             source_dir,

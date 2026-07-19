@@ -6,7 +6,29 @@ All notable changes to the FFmpeg Builder project.
 
 ### Added
 
+- **Package-manager style TUI** — Replaced the single-component progress screen with a live dashboard showing all buildable components, their statuses, and a service message log. The start screen now uses letter hotkeys (`b`/`r`/`c`/`w`/`i`/`q` + Enter) and a new `InfoScreen` displays the full component list with pagination. Component statuses are now driven by real builder phases: `pending`, `system`, `downloading`, `config`, `build`, `install`, `complete`, `fail`, `skip`. Added `ComponentStatus.SYSTEM` for components available on the host. The `BUILDING` status is now set after configure succeeds in all build paths (autotools, cmake, meson, make-only, cargo, custom). Download callbacks update the dashboard without tqdm interference. Error handler uses letter keys (`r`/`s`/`a`/`l`). All UI strings are in English.
+
+- **Incremental dashboard rows** — `BuildDashboard` rows now appear in the table only after a component receives its first status update. On a fresh build the table grows as the async download pool queues each archive; on resume the rows restored from `state.components` are revealed immediately so prior progress is visible from the first frame. The viewport pins in-progress rows (downloading / configuring / building / installing) so the user always sees what is currently happening even when the table is taller than the terminal
+
+- **Per-component download progress** — `Downloader.download()` now accepts a `progress_cb(downloaded, total)` callback. `AsyncDownloadManager` synthesises a per-component callback (throttled to 4 Hz) and forwards it to the dashboard, which renders a live `12.3/45.7 MB (27%)` string in the Detail column and updates the step bar. tqdm is suppressed when a callback is provided so the dashboard is the single source of progress for both compile and download phases
+
+- **Phase detail strings** — `StateManager.mark_component_status` accepts a transient `detail` argument that is forwarded to listeners but not persisted. The builder now passes the running command for each phase (e.g. `make -j40`, `cmake`, `ninja -C build`, `ninja install`, `cargo cinstall`, `install headers`), and the dispatcher stamps `queued`/`starting` on the `downloading` row depending on whether the async manager is active
+
+- **Tools / HW acceleration summary on start screen** — The start screen now collapses the per-tool availability table and the HW acceleration table into a single compact "Available Tools" row (`12/14 available · missing: cargo, rustc · HW accel: VAAPI, AMF`) so the screen fits without scrolling on common terminals. The full per-tool listing is still available via the `i` (Component info) screen
+
+- **Key reference help screen** — Every interactive screen now documents its key bindings. The start screen renders an "Actions" table with three columns (Key / Action / Description) so each key's purpose is obvious at a glance. A new `HelpScreen` (key `h`) lists the full key reference for all screens (start, component info, error prompt, build dashboard). The component info screen and the error prompt each have an `h` option to open the same reference inline. The build dashboard row in the reference explains that the dashboard refreshes automatically and that `Ctrl+C` aborts the build
+
 - **Async source downloads** — Source archives are now downloaded in a background thread pool while the previous component is being built. The build loop only blocks on the download for the component it is about to assemble, so network I/O and CPU compilation overlap. New `BuildConfig` fields control the feature: `async_downloads: bool` (default `true`) and `download_workers: int` (default `4`). Both `build_config.yaml` and `profiles/default.yaml` are updated. The interactive `ConfigScreen` exposes the new settings alongside the existing build flags. Implemented as `AsyncDownloadManager` in `ffmpeg_builder/downloader.py`; the per-file lock in `Downloader` and atomic `<archive>.part → <archive>` rename make the background downloads safe to share with the rest of the system. `FFmpegBuilder` gains `prefetch_downloads()`, `retry_download()`, and `shutdown_downloads()`, and the build loop in `app.py` now prefetches all buildable archives up-front, re-queues a download on retry, and stops the executor in a `finally` block on abort/error
+
+### Fixed
+
+- **`build_libvmaf` skipped `BUILDING` phase** — The status went straight from `configuring` to `installing` between `meson setup` and `ninja -C build`, so the dashboard showed `install` while the long compile was actually running. Now the `BUILDING` status is set after configure succeeds, with detail `ninja -C build`
+
+- **`build_libzmq` skipped `BUILDING` phase** — Same issue as `build_libvmaf`: the status jumped from `configuring` to `installing` between `./configure` and `make`. `BUILDING` is now set with detail `make -jN`
+
+### Notes
+
+- **Verified build still passes** — No functional regressions in the build engine; the [1.0.6] Fedora 44 verified run remains the reference for a complete end-to-end build with these UI changes applied
 
 ## [1.0.6] — 2026-07-19
 

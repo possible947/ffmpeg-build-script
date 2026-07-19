@@ -3,7 +3,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
@@ -11,6 +11,7 @@ from enum import Enum
 class ComponentStatus(str, Enum):
     """Component build status."""
     PENDING = "pending"
+    SYSTEM = "system"
     DOWNLOADING = "downloading"
     CONFIGURING = "configuring"
     BUILDING = "building"
@@ -18,6 +19,21 @@ class ComponentStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+TERMINAL_STATUSES = {
+    ComponentStatus.SYSTEM,
+    ComponentStatus.COMPLETED,
+    ComponentStatus.SKIPPED,
+}
+
+
+IN_PROGRESS_STATUSES = {
+    ComponentStatus.DOWNLOADING,
+    ComponentStatus.CONFIGURING,
+    ComponentStatus.BUILDING,
+    ComponentStatus.INSTALLING,
+}
 
 
 @dataclass
@@ -63,12 +79,16 @@ class BuildState:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BuildState":
         """Create from dictionary."""
-        components_data = data.pop("components", {})
-        state = cls(**data)
+        payload = dict(data)
+        components_data = payload.pop("components", {})
+        state = cls(**payload)
         
         for name, comp_data in components_data.items():
+            status = ComponentStatus(comp_data["status"])
+            if status in IN_PROGRESS_STATUSES:
+                status = ComponentStatus.PENDING
             state.components[name] = ComponentState(
-                status=ComponentStatus(comp_data["status"]),
+                status=status,
                 version=comp_data.get("version"),
                 built_at=comp_data.get("built_at"),
                 error_message=comp_data.get("error_message"),
@@ -89,6 +109,12 @@ class StateManager:
         """
         self.state_path = state_path or Path("workspace/build_state.json")
         self.state: Optional[BuildState] = None
+        self.status_listener: Optional[
+            Callable[
+                [str, ComponentStatus, Optional[str], Optional[str], Optional[str]],
+                None,
+            ]
+        ] = None
     
     def load(self) -> Optional[BuildState]:
         """Load state from file.
@@ -146,38 +172,45 @@ class StateManager:
         status: ComponentStatus,
         version: Optional[str] = None,
         error_message: Optional[str] = None,
-        log_file: Optional[str] = None
+        log_file: Optional[str] = None,
+        detail: Optional[str] = None,
     ) -> None:
         """Mark component with status.
-        
+
         Args:
             component_name: Name of the component.
             status: New status.
             version: Component version.
             error_message: Error message if failed.
             log_file: Path to log file.
+            detail: Optional transient detail (e.g. current command or
+                download progress). Not persisted to the state file.
         """
         state = self.get()
-        
+
         if component_name not in state.components:
             state.components[component_name] = ComponentState()
-        
+
         comp_state = state.components[component_name]
         comp_state.status = status
-        
+
         if version is not None:
             comp_state.version = version
-        
-        if status == ComponentStatus.COMPLETED:
+
+        if status in (ComponentStatus.COMPLETED, ComponentStatus.SYSTEM):
             comp_state.built_at = datetime.now().isoformat()
             comp_state.error_message = None
         elif status == ComponentStatus.FAILED:
             comp_state.error_message = error_message
-        
+        elif status != ComponentStatus.FAILED:
+            comp_state.error_message = None
+
         if log_file is not None:
             comp_state.log_file = log_file
-        
+
         self.save()
+        if self.status_listener is not None:
+            self.status_listener(component_name, status, version, error_message, detail)
     
     def update_progress(self, current_step: int, total_steps: int) -> None:
         """Update build progress.
@@ -200,7 +233,7 @@ class StateManager:
         state = self.get()
         
         for name, comp_state in state.components.items():
-            if comp_state.status not in (ComponentStatus.COMPLETED, ComponentStatus.SKIPPED):
+            if comp_state.status not in TERMINAL_STATUSES:
                 return name
         
         return None
@@ -222,6 +255,6 @@ class StateManager:
         
         comp_state = state.components[component_name]
         return (
-            comp_state.status == ComponentStatus.COMPLETED and
+            comp_state.status in (ComponentStatus.COMPLETED, ComponentStatus.SYSTEM) and
             comp_state.version == version
         )
