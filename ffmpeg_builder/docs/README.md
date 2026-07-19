@@ -232,6 +232,36 @@ Build logs are stored in:
 workspace/logs/<component>_<step>.log
 ```
 
+## Verified Environments
+
+The following environments have been verified to complete a full FFmpeg build:
+
+| Date | OS | Environment | Configuration | Result |
+|------|------|-------------|---------------|--------|
+| 2026-07-19 | Ubuntu 24.04 (WSL2) | x86_64, NVIDIA CUDA | GPL + non-free, native build | Successful build of FFmpeg 8.1 with all configured components enabled |
+
+Build configuration for the verified run:
+
+```yaml
+ffmpeg_version: "8.1"
+gpl_enabled: true
+native_build: true
+full_static: false
+enable_libvmaf: true
+disable_lv2: false
+num_jobs: auto
+```
+
+Verified FFmpeg capabilities included:
+
+- CUDA/NVENC/NVDEC: `--enable-cuda-nvcc`, `--enable-cuvid`, `--enable-nvdec`, `--enable-nvenc`, `--enable-cuda-llvm`, `--enable-ffnvcodec`
+- Video codecs: `libx264`, `libx265`, `libvpx`, `libaom`, `libsvtav1`, `libdav1d`, `libxvid`, `libwebp`, `libjxl`, `libzimg`
+- Audio codecs: `libmp3lame`, `libopus`, `libvorbis`, `libtheora`, `libfdk-aac`, `libsoxr`, `libopencore_amrnb`, `libopencore_amrwb`
+- Streaming/protocols: `openssl`, `libsrt`, `libzmq`
+- Other: `libvmaf`, `libvidstab`, `libfreetype`, `vapoursynth`, `lv2`, `vulkan`, `libglslang`
+
+Note: `rav1e` was skipped because the installed `rustc` version (1.75.0) was too old for the latest `cargo-c`. This is handled automatically by the builder.
+
 ## Project Structure
 
 ```

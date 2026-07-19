@@ -2,6 +2,25 @@
 
 All notable changes to the FFmpeg Builder project.
 
+## [1.0.4] — 2026-07-19
+
+### Fixed
+
+- **SVT-AV1 build** — Removed redundant `post_install` copy of `SvtAv1Enc.pc`; `make install` already installs it correctly
+- **rav1e rustc check** — Added `rustc` version check before installing `cargo-c`. If `rustc` is too old for the latest `cargo-c`, `rav1e` is now skipped instead of failing the build
+- **x265 build** — Fixed CMake source path (`../../../source`) and added copy of 10-bit/12-bit static libraries into the 8-bit build directory before linking, matching the original `build-ffmpeg` script
+- **aom (av1) extraction** — Added `archive_strip_components=0` because the aom archive from Google Source has no root directory
+- **aom (av1) out-of-source build** — Added `workdir="aom_build"` so CMake runs from a separate build directory, as required by aom
+- **executor stdin** — Fixed `subprocess.run` with `text=True` to pass string `input` instead of encoded bytes
+- **zimg libtoolize** — Falls back to system `libtoolize` when the workspace-built copy is not available
+- **nv-codec install prefix** — Added `PREFIX={workspace}` to `make` and `make install` so headers install into the workspace instead of `/usr/local`
+- **ffmpeg configure** — Removed unnecessary `-lcuda` and `-lvulkan` from `--extra-libs`; added `-L/usr/lib/wsl/lib` to `ldflags` on WSL2 so the linker can find `libcuda`
+- **cleanup command** — Fixed `clean` to reset the in-memory state via `StateManager.reset()`, preventing stale `build_state.json` from being recreated after cleanup
+
+### Notes
+
+- **Successful WSL2 build** — Full FFmpeg 8.1 build completed successfully on WSL2 (Ubuntu 24.04) with NVIDIA CUDA, Vulkan, and all configured codecs enabled
+
 ## [1.0.3] — 2026-07-18
 
 ### Fixed
