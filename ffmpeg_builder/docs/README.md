@@ -10,6 +10,7 @@ FFmpeg Builder replaces the traditional bash `build-ffmpeg` script with a modern
 - **Platform Detection** — Automatic detection of CPU, RAM, GPU, compilers, and build tools
 - **Hardware Acceleration** — Detects and configures CUDA, Vulkan, VAAPI, AMF, and OpenCL support
 - **Resumable Builds** — JSON state file tracks progress; interrupted builds can be resumed
+- **Async Downloads** — Source archives are fetched in a background thread pool while the current component compiles, so network and CPU work overlap
 - **Interactive Error Handling** — On failure, choose to retry, skip component, or abort
 - **YAML Configuration** — Human-readable build profiles with platform-specific settings
 - **~50 Components** — All codecs, libraries, and tools built from source in correct dependency order
@@ -117,6 +118,8 @@ full_static: false
 enable_libvmaf: true
 disable_lv2: false
 num_jobs: "auto"
+async_downloads: true
+download_workers: 4
 
 macos:
   clang: "macports-clang-17"

@@ -16,10 +16,10 @@ from ..state import BuildState, ComponentStatus
 
 class UIScreen:
     """Base UI screen."""
-    
+
     def __init__(self, console: Console):
         """Initialize screen.
-        
+
         Args:
             console: Rich console instance.
         """
@@ -28,7 +28,7 @@ class UIScreen:
 
 class SystemReportScreen(UIScreen):
     """System report screen."""
-    
+
     def show(
         self,
         report: SystemReport,
@@ -36,19 +36,19 @@ class SystemReportScreen(UIScreen):
         state: Optional[BuildState] = None,
     ) -> str:
         """Show system report screen.
-        
+
         Args:
             report: System report.
             config: Build configuration.
             state: Previous build state.
-            
+
         Returns:
             User action: "build", "resume", "config", "cleanup", or "exit".
         """
         self.console.clear()
         self.console.print("[bold blue]FFmpeg Builder - System Report[/bold blue]")
         self.console.print()
-        
+
         # Hardware info
         hw_table = Table(title="Hardware", show_header=False)
         hw_table.add_column("Property", style="cyan")
@@ -60,7 +60,7 @@ class SystemReportScreen(UIScreen):
             hw_table.add_row("GPU", ", ".join(report.system_info.gpu_info))
         self.console.print(hw_table)
         self.console.print()
-        
+
         # Software info
         sw_table = Table(title="Software", show_header=False)
         sw_table.add_column("Property", style="cyan")
@@ -72,18 +72,18 @@ class SystemReportScreen(UIScreen):
             os_display += " (WSL2)"
         sw_table.add_row("OS", os_display)
         sw_table.add_row("Architecture", report.system_info.architecture)
-        
+
         compiler = report.get_compiler_info()
         sw_table.add_row("Compiler", f"{compiler['compiler']} {compiler['version']}")
         self.console.print(sw_table)
         self.console.print()
-        
+
         # Tools
         tools_table = Table(title="Available Tools", show_header=True)
         tools_table.add_column("Tool", style="cyan")
         tools_table.add_column("Version")
         tools_table.add_column("Status")
-        
+
         for name, tool in report.tools.items():
             if tool.available:
                 status = "[green]Available[/green]"
@@ -92,24 +92,24 @@ class SystemReportScreen(UIScreen):
                 status = "[red]Missing[/red]"
                 version = "-"
             tools_table.add_row(name, version, status)
-        
+
         self.console.print(tools_table)
         self.console.print()
-        
+
         # Hardware acceleration
         hwaccel = report.get_hardware_acceleration_status()
         if hwaccel:
             hwaccel_table = Table(title="Hardware Acceleration", show_header=True)
             hwaccel_table.add_column("Type", style="cyan")
             hwaccel_table.add_column("Status")
-            
+
             for name, available in hwaccel.items():
                 status = "[green]Available[/green]" if available else "[red]Not Available[/red]"
                 hwaccel_table.add_row(name, status)
-            
+
             self.console.print(hwaccel_table)
             self.console.print()
-        
+
         # Build configuration
         config_table = Table(title="Build Configuration", show_header=False)
         config_table.add_column("Property", style="cyan")
@@ -119,14 +119,16 @@ class SystemReportScreen(UIScreen):
         config_table.add_row("Native Build", "Yes" if config.native_build else "No")
         config_table.add_row("Full Static", "Yes" if config.full_static else "No")
         config_table.add_row("Parallel Jobs", str(config.num_jobs))
+        config_table.add_row("Async Downloads", "Yes" if config.async_downloads else "No")
+        config_table.add_row("Download Workers", str(config.download_workers))
         self.console.print(config_table)
         self.console.print()
-        
+
         # Previous build state
         if state:
             completed = sum(1 for c in state.components.values() if c.status == ComponentStatus.COMPLETED)
             total = state.total_steps or len(state.components)
-            
+
             state_table = Table(title="Previous Build", show_header=False)
             state_table.add_column("Property", style="cyan")
             state_table.add_column("Value")
@@ -135,7 +137,7 @@ class SystemReportScreen(UIScreen):
             state_table.add_row("Progress", f"{completed}/{total} components")
             self.console.print(state_table)
             self.console.print()
-        
+
         # Menu
         self.console.print("[bold]Actions:[/bold]")
         self.console.print("  [1] Start new build")
@@ -144,13 +146,13 @@ class SystemReportScreen(UIScreen):
         self.console.print("  [3] Edit configuration")
         self.console.print("  [4] Cleanup workspace")
         self.console.print("  [5] Exit")
-        
+
         choices = ["1", "3", "4", "5"]
         if state:
             choices = ["1", "2", "3", "4", "5"]
-        
+
         choice = Prompt.ask("Choice", choices=choices)
-        
+
         if choice == "1":
             return "build"
         elif choice == "2":
@@ -165,64 +167,73 @@ class SystemReportScreen(UIScreen):
 
 class ConfigScreen(UIScreen):
     """Configuration edit screen."""
-    
+
     def show(self, config: BuildConfig) -> BuildConfig:
         """Show configuration edit screen.
-        
+
         Args:
             config: Current configuration.
-            
+
         Returns:
             Updated configuration.
         """
         self.console.clear()
         self.console.print("[bold blue]Edit Build Configuration[/bold blue]")
         self.console.print()
-        
+
         # GPL
         if Confirm.ask("Enable GPL and non-free codecs?", default=config.gpl_enabled):
             config.gpl_enabled = True
         else:
             config.gpl_enabled = False
-        
+
         # Native build
         if Confirm.ask("Enable native CPU optimizations?", default=config.native_build):
             config.native_build = True
         else:
             config.native_build = False
-        
+
         # Full static
         if Confirm.ask("Build full static binary (Linux only)?", default=config.full_static):
             config.full_static = True
         else:
             config.full_static = False
-        
+
         # libvmaf
         if Confirm.ask("Enable libvmaf?", default=config.enable_libvmaf):
             config.enable_libvmaf = True
         else:
             config.enable_libvmaf = False
-        
+
         # LV2
         if Confirm.ask("Disable LV2 libraries?", default=config.disable_lv2):
             config.disable_lv2 = True
         else:
             config.disable_lv2 = False
-        
+
         # Parallel jobs
         jobs = Prompt.ask("Number of parallel jobs", default=str(config.num_jobs))
         config.num_jobs = jobs
-        
+
+        # Async downloads
+        if Confirm.ask("Enable async source downloads?", default=config.async_downloads):
+            config.async_downloads = True
+        else:
+            config.async_downloads = False
+
+        workers = Prompt.ask("Number of download workers", default=str(config.download_workers))
+        config.download_workers = int(workers)
+
         self.console.print()
         self.console.print("[green]Configuration updated.[/green]")
         Prompt.ask("Press Enter to continue")
-        
+
         return config
 
 
 class BuildProgressScreen(UIScreen):
     """Build progress screen."""
-    
+
     def show(
         self,
         component_name: str,
@@ -232,7 +243,7 @@ class BuildProgressScreen(UIScreen):
         total: int,
     ) -> None:
         """Show build progress.
-        
+
         Args:
             component_name: Current component name.
             component_version: Component version.
@@ -243,20 +254,20 @@ class BuildProgressScreen(UIScreen):
         self.console.clear()
         self.console.print("[bold blue]Building FFmpeg[/bold blue]")
         self.console.print()
-        
+
         progress_table = Table(show_header=False)
         progress_table.add_column("Property", style="cyan")
         progress_table.add_column("Value")
         progress_table.add_row("Progress", f"{current}/{total}")
         progress_table.add_row("Component", f"{component_name} {component_version}")
         progress_table.add_row("Step", step)
-        
+
         self.console.print(progress_table)
 
 
 class FinalReportScreen(UIScreen):
     """Final build report screen."""
-    
+
     def show(
         self,
         state: BuildState,
@@ -265,7 +276,7 @@ class FinalReportScreen(UIScreen):
         error_message: Optional[str] = None,
     ) -> None:
         """Show final build report.
-        
+
         Args:
             state: Final build state.
             workspace: Workspace directory.
@@ -273,19 +284,19 @@ class FinalReportScreen(UIScreen):
             error_message: Error message if failed.
         """
         self.console.clear()
-        
+
         if success:
             self.console.print("[bold green]Build Completed Successfully![/bold green]")
         else:
             self.console.print("[bold red]Build Failed[/bold red]")
-        
+
         self.console.print()
-        
+
         # Summary
         completed = [name for name, c in state.components.items() if c.status == ComponentStatus.COMPLETED]
         failed = [name for name, c in state.components.items() if c.status == ComponentStatus.FAILED]
         skipped = [name for name, c in state.components.items() if c.status == ComponentStatus.SKIPPED]
-        
+
         summary_table = Table(title="Build Summary", show_header=True)
         summary_table.add_column("Status", style="cyan")
         summary_table.add_column("Count")
@@ -294,30 +305,30 @@ class FinalReportScreen(UIScreen):
         summary_table.add_row("[yellow]Skipped[/yellow]", str(len(skipped)))
         self.console.print(summary_table)
         self.console.print()
-        
+
         if success:
             # Binaries
             bin_dir = workspace / "bin"
             binaries = ["ffmpeg", "ffprobe", "ffplay"]
-            
+
             bin_table = Table(title="Built Binaries", show_header=True)
             bin_table.add_column("Binary", style="cyan")
             bin_table.add_column("Path")
-            
+
             for binary in binaries:
                 bin_path = bin_dir / binary
                 if bin_path.exists():
                     bin_table.add_row(binary, str(bin_path))
                 else:
                     bin_table.add_row(binary, "[dim]Not built[/dim]")
-            
+
             self.console.print(bin_table)
             self.console.print()
-            
+
             # Install prompt
             if Confirm.ask("Install binaries to system?", default=False):
                 self._install_binaries(bin_dir)
-        
+
         else:
             # Error details
             if error_message:
@@ -327,49 +338,49 @@ class FinalReportScreen(UIScreen):
                     border_style="red",
                 ))
                 self.console.print()
-            
+
             # Failed components
             if failed:
                 failed_table = Table(title="Failed Components", show_header=True)
                 failed_table.add_column("Component", style="cyan")
                 failed_table.add_column("Error")
-                
+
                 for name in failed:
                     comp_state = state.components[name]
                     error = comp_state.error_message or "Unknown error"
                     failed_table.add_row(name, error)
-                
+
                 self.console.print(failed_table)
                 self.console.print()
-    
+
     def _install_binaries(self, bin_dir: Path) -> None:
         """Install binaries to system.
-        
+
         Args:
             bin_dir: Directory containing binaries.
         """
         import platform
         import shutil
-        
+
         if platform.system() == "Darwin":
             install_dir = Path("/usr/local/bin")
         else:
             install_dir = Path.home() / ".local" / "bin"
-        
+
         install_dir.mkdir(parents=True, exist_ok=True)
-        
+
         binaries = ["ffmpeg", "ffprobe", "ffplay"]
-        
+
         for binary in binaries:
             src = bin_dir / binary
             dst = install_dir / binary
-            
+
             if src.exists():
                 try:
                     shutil.copy2(src, dst)
                     self.console.print(f"[green]Installed {binary} to {install_dir}[/green]")
                 except Exception as e:
                     self.console.print(f"[red]Failed to install {binary}: {e}[/red]")
-        
+
         self.console.print()
         self.console.print("[green]Installation complete.[/green]")

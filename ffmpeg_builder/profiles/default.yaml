@@ -8,6 +8,8 @@ full_static: false
 enable_libvmaf: true
 disable_lv2: false
 num_jobs: "auto"
+async_downloads: true
+download_workers: 4
 
 # macOS specific settings
 macos:

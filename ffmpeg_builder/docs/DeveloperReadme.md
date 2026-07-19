@@ -44,7 +44,8 @@ This document describes the internal architecture, module responsibilities, data
            +--------v------+       | CommandExec  |
            | downloader.py |       | - subprocess |
            | Downloader    |       | - logging    |
-           | requests+tqdm |       | - stdin      |
+           | AsyncDlMgr    |       | - stdin      |
+           | requests+tqdm |       |              |
            +---------------+       +--------------+
 ```
 
@@ -101,6 +102,8 @@ class BuildConfig:
     enable_libvmaf: bool = True
     disable_lv2: bool = False
     num_jobs: str = "auto"
+    async_downloads: bool = True
+    download_workers: int = 4
     macos: MacOSConfig          # clang version, openmp
     linux: LinuxConfig          # c_standard, cxx_standard
 ```
@@ -315,7 +318,17 @@ class Component:
 - Progress bar via `tqdm`
 - Retry logic (3 attempts, 10s delay)
 - Skip if file already exists and non-empty
-- Empty file detection and cleanup
+- Atomic `<archive>.part → <archive>` rename to prevent partial files
+- Per-file `threading.Lock` so concurrent callers do not race on the same archive
+
+**`AsyncDownloadManager`** — runs `Downloader.download` in a `ThreadPoolExecutor`:
+
+- `prefetch(components)` — schedules every buildable source archive up-front
+- `get(component)` — blocks on the in-flight download for the current component, returns the archive path; other downloads keep running in the background
+- `schedule(component)` / `retry(component)` — enqueue or replace a download (used when the user retries a failed component)
+- `shutdown(wait)` — stops workers; `cancel_futures` is used on Python 3.9+ for non-blocking shutdown
+
+`FFmpegBuilder` exposes this as `prefetch_downloads()`, `retry_download()`, and `shutdown_downloads()`. The build loop in `app.py` calls `prefetch_downloads()` once before the loop, `retry_download()` on retry, and `shutdown_downloads()` in a `finally` block.
 
 ### `ui/screens.py` — TUI Screens
 
@@ -361,17 +374,23 @@ app.run()
         +-> FFmpegBuilder(config, workspace, packages, state_mgr, platform_detect)
         |     _setup_environment() -> CFLAGS, LDFLAGS, env
         |
+        +-> builder.prefetch_downloads(components)
+        |     AsyncDownloadManager queues every buildable source archive
+        |
         +-> for each component:
               |
               +-> builder.build_component(component)
               |     |
               |     +-> is_component_completed() -> skip?
-              |     +-> _download_and_extract()
+              |     +-> async_download_manager.get(component) -> archive
               |     +-> dispatch to build system handler
               |     +-> mark_component_status(COMPLETED)
               |
               +-> on BuildError:
                     error_handler.handle_error() -> retry/skip/abort
+                    on retry: builder.retry_download(component)
+        finally:
+            builder.shutdown_downloads(wait=False)
 ```
 
 ### State Persistence

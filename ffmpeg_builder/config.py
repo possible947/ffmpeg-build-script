@@ -29,6 +29,8 @@ class BuildConfig:
     enable_libvmaf: bool = True
     disable_lv2: bool = False
     num_jobs: str = "auto"
+    async_downloads: bool = True
+    download_workers: int = 4
     macos: MacOSConfig = field(default_factory=MacOSConfig)
     linux: LinuxConfig = field(default_factory=LinuxConfig)
     
