@@ -1,5 +1,6 @@
 """Platform detection and system information gathering."""
 import platform
+import re
 import subprocess
 import shutil
 from pathlib import Path
@@ -185,6 +186,9 @@ class PlatformDetector:
                             self.system_info.ram_gb = ram_kb / (1024 * 1024)
                             break
                 
+                # GPU info
+                self._detect_gpu_info()
+                
         except Exception:
             pass
         
@@ -202,6 +206,72 @@ class PlatformDetector:
             except Exception:
                 pass
     
+    def _detect_gpu_info(self) -> None:
+        """Detect GPU information on Linux.
+
+        Populates system_info.gpu_info with human readable GPU model names and
+        stores whether an AMD GPU is present for AMF enablement.
+        """
+        self.system_info.gpu_info = []
+        self._amd_gpu_detected = False
+
+        lspci = shutil.which("lspci")
+        if lspci:
+            try:
+                result = subprocess.run(
+                    [lspci, "-nn"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if (
+                            "VGA compatible controller" in line
+                            or "3D controller" in line
+                            or "Display controller" in line
+                        ):
+                            # Match vendor bracket and device model.
+                            # Example: ... [AMD/ATI] Vega 20 [Radeon Pro VII/...] [1002:66a1] (rev 06)
+                            match = re.search(r"\[([A-Za-z/]+)\]\s+(.*?)\s+\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]", line)
+                            if match:
+                                vendor_label = match.group(1)
+                                model = match.group(2).split("[")[0].strip()
+                                # Skip the ASPEED BMC graphics adapter
+                                if "ASPEED" in model or "BMC" in model:
+                                    continue
+                                self.system_info.gpu_info.append(model)
+                                if vendor_label in ("AMD/ATI", "AMD", "ATI"):
+                                    self._amd_gpu_detected = True
+            except Exception:
+                pass
+
+        # Fallback: enumerate DRM devices via sysfs if lspci parsing failed
+        if not self.system_info.gpu_info:
+            try:
+                drm_path = Path("/sys/class/drm")
+                if drm_path.exists():
+                    seen = set()
+                    for device in drm_path.iterdir():
+                        if not device.name.startswith("card"):
+                            continue
+                        device_dir = device / "device"
+                        vendor_file = device_dir / "vendor"
+                        if vendor_file.exists():
+                            vendor_id = vendor_file.read_text().strip()
+                            if vendor_id in seen:
+                                continue
+                            seen.add(vendor_id)
+                            if vendor_id == "0x1002":
+                                self.system_info.gpu_info.append("AMD GPU")
+                                self._amd_gpu_detected = True
+                            elif vendor_id == "0x10de":
+                                self.system_info.gpu_info.append("NVIDIA GPU")
+                            elif vendor_id == "0x8086":
+                                self.system_info.gpu_info.append("Intel GPU")
+            except Exception:
+                pass
+    
     def _detect_platform_info(self) -> None:
         """Detect platform-specific information."""
         self.platform_info.is_macos = platform.system() == "Darwin"
@@ -212,6 +282,11 @@ class PlatformDetector:
         if self.platform_info.is_linux:
             self.platform_info.is_wsl2 = self._check_wsl2()
         
+        # Detect AMF on Linux: enable when an AMD GPU is present, since the
+        # AMF headers component downloads the required headers from GPUOpen.
+        if self.platform_info.is_linux:
+            self.platform_info.amf_available = getattr(self, "_amd_gpu_detected", False)
+        
         # Detect macports clang on macOS
         if self.platform_info.is_macos:
             self.platform_info.macports_clang = self._find_macports_clang()
@@ -221,7 +296,6 @@ class PlatformDetector:
             self._detect_cuda()
             self.platform_info.vaapi_available = self._check_vaapi()
             self.platform_info.qsv_available = self._check_qsv()
-            self.platform_info.amf_available = self._check_amf()
             self.platform_info.vulkan_available = self._check_vulkan()
             self.platform_info.opencl_available = self._check_opencl()
     
@@ -320,16 +394,19 @@ class PlatformDetector:
             except Exception:
                 pass
         
-        # Check for Intel GPU via PCI IDs
+        # Check for Intel GPU via PCI IDs (only display/3D class devices)
+        display_class_prefixes = ("03", "0300", "0301", "0302", "0320", "0380")
         try:
             pci_devices = Path("/sys/bus/pci/devices")
             if pci_devices.exists():
                 for device in pci_devices.iterdir():
                     vendor_file = device / "vendor"
-                    if vendor_file.exists():
+                    class_file = device / "class"
+                    if vendor_file.exists() and class_file.exists():
                         vendor_id = vendor_file.read_text().strip()
-                        # Intel vendor ID is 0x8086
-                        if vendor_id == "0x8086":
+                        class_code = class_file.read_text().strip()
+                        # Intel vendor ID is 0x8086, class must be display/3D
+                        if vendor_id == "0x8086" and class_code.startswith(display_class_prefixes):
                             return True
         except Exception:
             pass

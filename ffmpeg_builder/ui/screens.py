@@ -125,7 +125,7 @@ class SystemReportScreen(UIScreen):
         # Previous build state
         if state:
             completed = sum(1 for c in state.components.values() if c.status == ComponentStatus.COMPLETED)
-            total = len(state.components)
+            total = state.total_steps or len(state.components)
             
             state_table = Table(title="Previous Build", show_header=False)
             state_table.add_column("Property", style="cyan")
