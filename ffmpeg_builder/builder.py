@@ -87,7 +87,7 @@ class FFmpegBuilder:
         self.packages.mkdir(parents=True, exist_ok=True)
         
         self.cflags = f"-I{self.workspace}/include -Wno-int-conversion"
-        self.ldflags = f"-L{self.workspace}/lib"
+        self.ldflags = f"-L{self.workspace}/lib -L{self.workspace}/lib64"
         self.ldexeflags = ""
         self.extralibs = "-ldl -lpthread -lm -lz"
         
@@ -108,6 +108,11 @@ class FFmpegBuilder:
             self.cxxflags += " -march=native -mtune=native"
         
         pkg_config_path = f"{self.workspace}/lib/pkgconfig"
+        # Some CMake-based components (e.g. SVT-AV1) honour
+        # CMAKE_INSTALL_LIBDIR and install to <prefix>/lib64 on distributions
+        # like Fedora. Add the lib64 pkgconfig directory so FFmpeg's
+        # `require_pkg_config` lookups find them.
+        pkg_config_path += f":{self.workspace}/lib64/pkgconfig"
         
         # Add architecture-specific paths for Linux
         if self.platform == "linux":
@@ -172,7 +177,7 @@ class FFmpegBuilder:
         env = self.env.copy()
         
         if component:
-            if component.name in component.platform_overrides:
+            if self.platform in component.platform_overrides:
                 override = component.platform_overrides[self.platform]
                 env.update(override.extra_env)
                 
@@ -790,6 +795,22 @@ class FFmpegBuilder:
         if not result.success:
             raise BuildError(component.name, "Configure failed", log_file)
         
+        # OpenSSL Configure forces -std=c11 on x86_64, which breaks GCC 16's
+        # handling of inline assembly in crypto/bn/asm/x86_64-gcc.c. Replace it
+        # with -std=gnu11 in the generated config and regenerate the Makefile.
+        configdata = source_dir / "configdata.pm"
+        if configdata.exists():
+            content = configdata.read_text()
+            content = content.replace("-std=c11", "-std=gnu11")
+            configdata.write_text(content)
+            result2 = self.executor.execute(
+                ["perl", str(configdata)],
+                cwd=source_dir,
+                env=env,
+            )
+            if not result2.success:
+                raise BuildError(component.name, "configdata.pm regeneration failed")
+        
         result, log_file = self.executor.execute_make(
             source_dir,
             self.num_jobs,
@@ -872,16 +893,34 @@ class FFmpegBuilder:
     
     def build_x265(self, component: Component, source_dir: Path) -> None:
         """Build x265 (multi-bitdepth).
-        
+
         Args:
             component: Component to build.
             source_dir: Source directory.
         """
         env = self.get_build_env(component)
-        
+
         if self.platform == "darwin" and self.platform_detector.platform_info.is_arm64:
             env["CXXFLAGS"] = f"-DHAVE_NEON=1 {env.get('CXXFLAGS', '')}"
-        
+
+        # Patch json11.cpp to include <cstdint>. Newer libstdc++ (GCC 15/16)
+        # no longer transitively pulls <cstdint> via <limits>, so uint8_t
+        # becomes undeclared and the dynamicHDR10 helper fails to compile.
+        # Mirrors the original bash script's sed patch.
+        json11_cpp = source_dir / "source" / "dynamicHDR10" / "json11" / "json11.cpp"
+        if json11_cpp.exists():
+            content = json11_cpp.read_text()
+            if "#include <cstdint>" not in content:
+                lines = content.split("\n")
+                insert_idx = None
+                for i, line in enumerate(lines):
+                    if line.strip() == "#include <limits>":
+                        insert_idx = i + 1
+                        break
+                if insert_idx is not None:
+                    lines.insert(insert_idx, "#include <cstdint>")
+                    json11_cpp.write_text("\n".join(lines))
+
         build_linux = source_dir / "build" / "linux"
         if not build_linux.exists():
             raise BuildError(component.name, "Build directory not found")
@@ -962,7 +1001,7 @@ class FFmpegBuilder:
         if self.platform == "darwin":
             libtool = "glibtool" if shutil.which("glibtool") else "libtool"
             result, log_file = self.executor.execute_with_log(
-                [libtool, "-static", "-o", str(lib_main), str(lib_main), str(lib_main10), str(lib_main12)],
+                [libtool, "-static", "-o", str(lib_main), str(lib_main_renamed), str(lib_main10), str(lib_main12)],
                 component.name,
                 "merge-libs",
                 eight_dir,
@@ -1524,6 +1563,12 @@ class FFmpegBuilder:
         
         if "libjxl" in built_components:
             self.extralibs += " -llcms2"
+            # libjxl_threads is a C++ library but its pkg-config file does
+            # not list -lstdc++ in Libs.private, so FFmpeg's pkg-config
+            # check fails to link. Adding -lstdc++ here covers the
+            # std::thread / std::condition_variable symbols.
+            if self.platform != "darwin":
+                self.extralibs += " -lstdc++"
         
         if "opencl-icd-loader" in built_components:
             self.extralibs += " -lva"
