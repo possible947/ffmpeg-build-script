@@ -42,7 +42,10 @@ class BuildConfig:
         macos_data = data.get("macos", {})
         linux_data = data.get("linux", {})
         
-        config = cls(**data)
+        # Filter out nested config dicts before passing to constructor
+        config_data = {k: v for k, v in data.items() if k not in ("macos", "linux")}
+        
+        config = cls(**config_data)
         config.macos = MacOSConfig(**macos_data)
         config.linux = LinuxConfig(**linux_data)
         

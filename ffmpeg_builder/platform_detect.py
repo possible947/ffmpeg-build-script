@@ -106,6 +106,26 @@ class PlatformDetector:
         
         return self.system_info, self.platform_info, self.tools
     
+    def get_multiarch_dir(self) -> str:
+        """Get Linux multiarch directory suffix based on architecture.
+        
+        Returns:
+            Multiarch directory string (e.g., "x86_64-linux-gnu") or empty string.
+        """
+        if not self.platform_info.is_linux:
+            return ""
+        
+        arch = self.system_info.architecture
+        arch_map = {
+            "x86_64": "x86_64-linux-gnu",
+            "aarch64": "aarch64-linux-gnu",
+            "arm64": "aarch64-linux-gnu",
+            "armv7l": "arm-linux-gnueabihf",
+            "i386": "i386-linux-gnu",
+            "i686": "i386-linux-gnu",
+        }
+        return arch_map.get(arch, "")
+    
     def _detect_system_info(self) -> None:
         """Detect system information."""
         self.system_info.os_name = platform.system()
@@ -342,6 +362,10 @@ class PlatformDetector:
         Returns:
             True if VAAPI is available.
         """
+        # VAAPI is not supported in WSL2
+        if self.platform_info.is_wsl2:
+            return False
+        
         try:
             result = subprocess.run(
                 ["pkg-config", "--exists", "libva"],
@@ -418,10 +442,17 @@ class PlatformDetector:
         
         # Check for ICD loader library
         icd_loader_paths = [
-            Path("/usr/lib/x86_64-linux-gnu/libOpenCL.so"),
-            Path("/usr/lib/x86_64-linux-gnu/libOpenCL.so.1"),
             Path("/usr/lib/libOpenCL.so"),
+            Path("/usr/lib64/libOpenCL.so"),
         ]
+        
+        # Add architecture-specific paths
+        multiarch = self.get_multiarch_dir()
+        if multiarch:
+            icd_loader_paths.extend([
+                Path(f"/usr/lib/{multiarch}/libOpenCL.so"),
+                Path(f"/usr/lib/{multiarch}/libOpenCL.so.1"),
+            ])
         
         has_loader = any(path.exists() for path in icd_loader_paths)
         if not has_loader:

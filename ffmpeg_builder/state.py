@@ -120,6 +120,12 @@ class StateManager:
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(self.state.to_dict(), f, indent=2)
     
+    def reset(self) -> None:
+        """Reset state in memory and remove state file if it exists."""
+        self.state = None
+        if self.state_path.exists():
+            self.state_path.unlink()
+    
     def get(self) -> BuildState:
         """Get current state.
         

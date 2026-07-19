@@ -70,7 +70,7 @@ class CommandExecutor:
                 capture_output=capture_output,
                 text=True,
                 timeout=timeout,
-                input=stdin.encode() if stdin else None,
+                input=stdin if stdin else None,
             )
             
             return ExecutionResult(

@@ -1,9 +1,10 @@
 """Build orchestration engine."""
 import os
+import re
 import tarfile
 import shutil
 from pathlib import Path
-from typing import Optional, List, Dict, Callable
+from typing import Optional, List, Dict, Callable, Tuple
 from tqdm import tqdm
 
 from .config import BuildConfig
@@ -30,6 +31,21 @@ class BuildError(Exception):
         self.log_file = log_file
 
 
+class SkipComponent(Exception):
+    """Raised when a component should be skipped (not failed)."""
+    
+    def __init__(self, component: str, message: str):
+        """Initialize skip exception.
+        
+        Args:
+            component: Component name.
+            message: Skip reason.
+        """
+        super().__init__(f"{component}: {message}")
+        self.component = component
+        self.message = message
+
+
 class FFmpegBuilder:
     """Orchestrates FFmpeg build process."""
     
@@ -51,13 +67,13 @@ class FFmpegBuilder:
             platform_detector: Platform detector instance.
         """
         self.config = config
-        self.workspace = workspace
-        self.packages = packages
+        self.workspace = workspace.absolute()
+        self.packages = packages.absolute()
         self.state_manager = state_manager
         self.platform_detector = platform_detector
         
-        self.executor = CommandExecutor(workspace)
-        self.downloader = Downloader(packages)
+        self.executor = CommandExecutor(self.workspace)
+        self.downloader = Downloader(self.packages)
         self.registry = ComponentRegistry()
         
         self.num_jobs = platform_detector.get_num_jobs(config.num_jobs)
@@ -92,10 +108,17 @@ class FFmpegBuilder:
             self.cxxflags += " -march=native -mtune=native"
         
         pkg_config_path = f"{self.workspace}/lib/pkgconfig"
-        pkg_config_path += ":/usr/local/lib/x86_64-linux-gnu/pkgconfig"
+        
+        # Add architecture-specific paths for Linux
+        if self.platform == "linux":
+            multiarch = self.platform_detector.get_multiarch_dir()
+            if multiarch:
+                pkg_config_path += f":/usr/local/lib/{multiarch}/pkgconfig"
+                pkg_config_path += f":/usr/lib/{multiarch}/pkgconfig"
+        
+        # Add generic paths
         pkg_config_path += ":/usr/local/lib/pkgconfig"
         pkg_config_path += ":/usr/local/share/pkgconfig"
-        pkg_config_path += ":/usr/lib/x86_64-linux-gnu/pkgconfig"
         pkg_config_path += ":/usr/lib/pkgconfig"
         pkg_config_path += ":/usr/share/pkgconfig"
         pkg_config_path += ":/usr/lib64/pkgconfig"
@@ -121,6 +144,8 @@ class FFmpegBuilder:
                 cuda_home = str(Path(cuda_path).parent.parent)
                 self.cflags += f" -I{cuda_home}/include"
                 self.ldflags += f" -L{cuda_home}/lib64"
+                if self.platform_detector.platform_info.is_wsl2:
+                    self.ldflags += " -L/usr/lib/wsl/lib"
                 self.env["PATH"] = f"{cuda_home}/bin:{self.env['PATH']}"
                 self.env["CFLAGS"] = self.cflags
                 self.env["LDFLAGS"] = self.ldflags
@@ -216,6 +241,16 @@ class FFmpegBuilder:
         if self.state_manager.is_component_completed(component.name, component.version):
             return
         
+        # Skip system components if already available
+        if component.system_component and component.system_tool_name:
+            if self._is_system_component_available(component.system_tool_name):
+                self.state_manager.mark_component_status(
+                    component.name,
+                    ComponentStatus.COMPLETED,
+                    component.version,
+                )
+                return
+        
         self.state_manager.mark_component_status(
             component.name,
             ComponentStatus.DOWNLOADING,
@@ -227,6 +262,7 @@ class FFmpegBuilder:
         
         if component.build_system == BuildSystem.HEADERS_ONLY:
             self._install_headers_only(component, source_dir)
+            self._execute_post_install(component, source_dir)
             return
         
         self.state_manager.mark_component_status(
@@ -239,6 +275,7 @@ class FFmpegBuilder:
             build_fn = getattr(self, component.custom_build_fn, None)
             if build_fn:
                 build_fn(component, source_dir)
+                self._execute_post_install(component, source_dir)
                 return
         
         if component.build_system == BuildSystem.AUTOTOOLS:
@@ -253,6 +290,79 @@ class FFmpegBuilder:
             self._build_cargo(component, source_dir)
         else:
             raise BuildError(component.name, f"Unknown build system: {component.build_system}")
+        
+        self._execute_post_install(component, source_dir)
+    
+    def _execute_post_install(self, component: Component, source_dir: Path) -> None:
+        """Execute post-install commands if defined.
+        
+        Args:
+            component: Component to process.
+            source_dir: Source directory.
+        """
+        if not component.post_install:
+            return
+        
+        cmd = component.post_install.replace("{workspace}", str(self.workspace.absolute()))
+        env = self.get_build_env(component)
+        
+        result, log_file = self.executor.execute_with_log(
+            ["sh", "-c", cmd],
+            component.name,
+            "post-install",
+            source_dir,
+            env,
+        )
+        
+        if not result.success:
+            raise BuildError(component.name, f"Post-install failed: {cmd}", log_file)
+    
+    def _is_system_component_available(self, tool_name: str) -> bool:
+        """Check if a system component is already available.
+        
+        Args:
+            tool_name: Name of the tool/library to check.
+            
+        Returns:
+            True if available in system, False otherwise.
+        """
+        import shutil
+        import subprocess
+        
+        # Check if it's a known tool
+        if tool_name in self.platform_detector.tools:
+            tool_info = self.platform_detector.tools[tool_name]
+            if tool_info.available:
+                return True
+        
+        # Check if tool exists in PATH
+        if shutil.which(tool_name):
+            return True
+        
+        # Check via pkg-config for libraries
+        try:
+            result = subprocess.run(
+                ["pkg-config", "--exists", tool_name],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+        
+        # Check for common library headers
+        lib_headers = {
+            "giflib": "/usr/include/gif_lib.h",
+            "zlib": "/usr/include/zlib.h",
+        }
+        
+        if tool_name in lib_headers:
+            from pathlib import Path
+            if Path(lib_headers[tool_name]).exists():
+                return True
+        
+        return False
     
     def _download_and_extract(self, component: Component) -> Path:
         """Download and extract component source.
@@ -301,7 +411,7 @@ class FFmpegBuilder:
             build_dir = source_dir / component.workdir
         
         configure_args = [
-            arg.replace("{workspace}", str(self.workspace))
+            arg.replace("{workspace}", str(self.workspace.absolute()))
             .replace("{num_jobs}", str(self.num_jobs))
             for arg in component.configure_args
         ]
@@ -357,7 +467,7 @@ class FFmpegBuilder:
             build_dir.mkdir(parents=True, exist_ok=True)
         
         cmake_args = [
-            arg.replace("{workspace}", str(self.workspace))
+            arg.replace("{workspace}", str(self.workspace.absolute()))
             for arg in component.configure_args
         ]
         
@@ -412,7 +522,7 @@ class FFmpegBuilder:
         build_dir.mkdir(parents=True, exist_ok=True)
         
         meson_args = [
-            arg.replace("{workspace}", str(self.workspace))
+            arg.replace("{workspace}", str(self.workspace.absolute()))
             for arg in component.configure_args
         ]
         
@@ -470,11 +580,17 @@ class FFmpegBuilder:
         
         env = self.get_build_env(component)
         
-        result, log_file = self.executor.execute_make(
-            build_dir,
-            self.num_jobs,
-            env,
+        build_args = [
+            arg.replace("{workspace}", str(self.workspace.absolute()))
+            for arg in component.build_args
+        ]
+        
+        result, log_file = self.executor.execute_with_log(
+            ["make", f"-j{self.num_jobs}"] + build_args,
             component.name,
+            "build",
+            build_dir,
+            env,
         )
         
         if not result.success:
@@ -486,14 +602,36 @@ class FFmpegBuilder:
             component.version,
         )
         
-        result, log_file = self.executor.execute_install(
+        install_args = [
+            arg.replace("{workspace}", str(self.workspace.absolute()))
+            for arg in component.install_args
+        ]
+        
+        result, log_file = self.executor.execute_with_log(
+            ["make", "install"] + install_args,
+            component.name,
+            "install",
             build_dir,
             env,
-            component.name,
         )
         
         if not result.success:
             raise BuildError(component.name, "Install failed", log_file)
+    
+    def _get_rustc_version(self) -> Optional[Tuple[int, int, int]]:
+        """Get installed rustc version.
+        
+        Returns:
+            Tuple of (major, minor, patch) or None if not available.
+        """
+        env = self.get_build_env()
+        result = self.executor.execute(["rustc", "--version"], env=env)
+        if not result.success:
+            return None
+        match = re.search(r"rustc\s+(\d+)\.(\d+)\.(\d+)", result.stdout)
+        if not match:
+            return None
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
     
     def _build_cargo(self, component: Component, source_dir: Path) -> None:
         """Build component with Cargo.
@@ -504,6 +642,20 @@ class FFmpegBuilder:
         """
         env = self.get_build_env(component)
         env["RUSTFLAGS"] = "-C target-cpu=native"
+        
+        rustc_version = self._get_rustc_version()
+        if rustc_version is None:
+            raise SkipComponent(
+                component.name,
+                "rustc is not available or version cannot be determined"
+            )
+        
+        if rustc_version < (1, 95, 0):
+            raise SkipComponent(
+                component.name,
+                f"rustc {'.'.join(map(str, rustc_version))} is too old. "
+                f"cargo-c requires rustc 1.95 or newer"
+            )
         
         result, log_file = self.executor.execute_with_log(
             ["cargo", "install", "cargo-c"],
@@ -566,6 +718,48 @@ class FFmpegBuilder:
                         shutil.copy2(item, dest_item)
                     elif item.is_dir():
                         shutil.copytree(item, dest_item, dirs_exist_ok=True)
+    
+    def build_giflib(self, component: Component, source_dir: Path) -> None:
+        """Build giflib.
+        
+        Patches Makefile to skip documentation build (requires ImageMagick).
+        
+        Args:
+            component: Component to build.
+            source_dir: Source directory.
+        """
+        env = self.get_build_env(component)
+        
+        makefile = source_dir / "Makefile"
+        if makefile.exists():
+            content = makefile.read_text()
+            content = content.replace("$(MAKE) -C doc", "")
+            content = content.replace(
+                "install: all install-bin install-include install-lib install-man",
+                "install: all install-bin install-include install-lib"
+            )
+            makefile.write_text(content)
+        
+        result, log_file = self.executor.execute_make(
+            source_dir,
+            1,
+            env,
+            component.name,
+        )
+        
+        if not result.success:
+            raise BuildError(component.name, "Build failed", log_file)
+        
+        result, log_file = self.executor.execute_with_log(
+            ["make", f"PREFIX={self.workspace.absolute()}", "install"],
+            component.name,
+            "install",
+            source_dir,
+            env,
+        )
+        
+        if not result.success:
+            raise BuildError(component.name, "Install failed", log_file)
     
     def build_openssl(self, component: Component, source_dir: Path) -> None:
         """Build OpenSSL.
@@ -726,9 +920,13 @@ class FFmpegBuilder:
                     "-DLINKED_10BIT=ON",
                     "-DLINKED_12BIT=ON",
                 ])
+                
+                # Copy 10bit and 12bit libraries into 8bit build dir before linking
+                shutil.copy(build_linux / "10bit" / "libx265.a", bitdepth_dir / "libx265_main10.a")
+                shutil.copy(build_linux / "12bit" / "libx265.a", bitdepth_dir / "libx265_main12.a")
             
             result, log_file = self.executor.execute_with_log(
-                ["cmake", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"] + cmake_args + ["../../.."],
+                ["cmake", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"] + cmake_args + ["../../../source"],
                 component.name,
                 f"configure-{bitdepth}",
                 bitdepth_dir,
@@ -756,6 +954,10 @@ class FFmpegBuilder:
         
         shutil.copy(build_linux / "10bit" / "libx265.a", lib_main10)
         shutil.copy(build_linux / "12bit" / "libx265.a", lib_main12)
+        
+        # Rename 8bit library before merging (matching original build-ffmpeg script)
+        lib_main_renamed = eight_dir / "libx265_main.a"
+        shutil.move(str(lib_main), str(lib_main_renamed))
         
         if self.platform == "darwin":
             libtool = "glibtool" if shutil.which("glibtool") else "libtool"
@@ -858,10 +1060,21 @@ class FFmpegBuilder:
             component: Component to build.
             source_dir: Source directory.
         """
+        import shutil
+        
         env = self.get_build_env(component)
         
+        # Use workspace libtoolize if available, otherwise fall back to system
+        libtoolize = f"{self.workspace}/bin/libtoolize"
+        if not Path(libtoolize).exists():
+            system_libtoolize = shutil.which("libtoolize")
+            if system_libtoolize:
+                libtoolize = system_libtoolize
+            else:
+                raise BuildError(component.name, "libtoolize not found")
+        
         result, log_file = self.executor.execute_with_log(
-            [f"{self.workspace}/bin/libtoolize", "-i", "-f", "-q"],
+            [libtoolize, "-i", "-f", "-q"],
             component.name,
             "libtoolize",
             source_dir,
@@ -1312,12 +1525,6 @@ class FFmpegBuilder:
         if "libjxl" in built_components:
             self.extralibs += " -llcms2"
         
-        if "nv-codec" in built_components:
-            self.extralibs += " -lcuda"
-        
-        if "vulkan-headers" in built_components:
-            self.extralibs += " -lvulkan"
-        
         if "opencl-icd-loader" in built_components:
             self.extralibs += " -lva"
         
@@ -1367,11 +1574,13 @@ class FFmpegBuilder:
         else:
             configure_args.append("--disable-ffnvcodec")
         
+        # VAAPI support
+        if self.platform_detector.platform_info.vaapi_available and not self.config.full_static:
+            configure_args.append("--enable-vaapi")
+        
         # Intel QSV support
         if self.platform_detector.platform_info.qsv_available:
             configure_args.append("--enable-libvpl")
-            if not self.config.full_static:
-                configure_args.append("--enable-vaapi")
         
         if self.platform == "darwin":
             configure_args.append(f"--extra-version={component.version}")

@@ -143,7 +143,8 @@ class ComponentRegistry:
                 version="5.2.2",
                 url="https://sf-eu-introserv-1.dl.sourceforge.net/project/giflib/giflib-5.x/giflib-{version}.tar.gz",
                 category=ComponentCategory.BUILD_TOOL,
-                build_system=BuildSystem.MAKE_ONLY,
+                build_system=BuildSystem.CUSTOM,
+                custom_build_fn="build_giflib",
                 system_component=True,
                 system_tool_name="giflib",
             ),
@@ -291,6 +292,9 @@ class ComponentRegistry:
                     "--prefix={workspace}",
                     "--enable-static",
                     "--disable-shared",
+                    "--without-libiconv-prefix",
+                    "--without-libintl-prefix",
+                    "--disable-c++",
                 ],
                 gpl_only=True,
             ),
@@ -395,7 +399,6 @@ class ComponentRegistry:
                 ],
                 workdir="Build/linux",
                 archive_filename="svtav1-{version}.tar.gz",
-                post_install="cp SvtAv1Enc.pc {workspace}/lib/pkgconfig/",
                 ffmpeg_configure_flag="--enable-libsvtav1",
             ),
             Component(
@@ -477,6 +480,7 @@ class ComponentRegistry:
                 url="https://aomedia.googlesource.com/aom/+archive/refs/tags/v{version}.tar.gz",
                 category=ComponentCategory.VIDEO_CODEC,
                 build_system=BuildSystem.CMAKE,
+                workdir="aom_build",
                 configure_args=[
                     "-DENABLE_TESTS=0",
                     "-DENABLE_EXAMPLES=0",
@@ -484,6 +488,8 @@ class ComponentRegistry:
                     "-DCMAKE_INSTALL_LIBDIR=lib",
                 ],
                 archive_dirname="av1",
+                archive_filename="av1-{version}.tar.gz",
+                archive_strip_components=0,
                 ffmpeg_configure_flag="--enable-libaom",
             ),
             Component(
@@ -928,6 +934,8 @@ class ComponentRegistry:
                 url="https://github.com/FFmpeg/nv-codec-headers/releases/download/n{version}/nv-codec-headers-{version}.tar.gz",
                 category=ComponentCategory.HW_ACCEL,
                 build_system=BuildSystem.MAKE_ONLY,
+                build_args=["PREFIX={workspace}"],
+                install_args=["PREFIX={workspace}"],
                 linux_only=True,
             ),
             Component(

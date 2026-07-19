@@ -8,7 +8,7 @@ from .state import StateManager, ComponentStatus
 from .platform_detect import PlatformDetector
 from .system_report import SystemReportGenerator
 from .components import ComponentRegistry
-from .builder import FFmpegBuilder, BuildError
+from .builder import FFmpegBuilder, BuildError, SkipComponent
 from .ui.screens import SystemReportScreen, ConfigScreen, BuildProgressScreen, FinalReportScreen
 from .ui.error_handler import ErrorHandler
 
@@ -179,6 +179,17 @@ class FFmpegBuilderApp:
                 self.console.print(f"[green]✓ {component.name} {component.version}[/green]")
                 idx += 1
             
+            except SkipComponent as e:
+                self.state_manager.mark_component_status(
+                    component.name,
+                    ComponentStatus.SKIPPED,
+                    component.version,
+                    str(e),
+                )
+                self.console.print(f"[yellow]⊘ {component.name} skipped: {e.message}[/yellow]")
+                idx += 1
+                continue
+            
             except BuildError as e:
                 self.state_manager.mark_component_status(
                     component.name,
@@ -226,10 +237,8 @@ class FFmpegBuilderApp:
         """Cleanup workspace and packages."""
         import shutil
         
-        state_file = self.workspace / "build_state.json"
-        if state_file.exists():
-            state_file.unlink()
-            self.console.print(f"[green]Removed {state_file}[/green]")
+        self.state_manager.reset()
+        self.console.print("[green]Reset build state[/green]")
         
         if self.workspace.exists():
             shutil.rmtree(self.workspace)
