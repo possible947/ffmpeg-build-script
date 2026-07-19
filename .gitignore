@@ -15,3 +15,9 @@ build/
 *.egg
 .mypy_cache/
 .pytest_cache/
+.kilo/
+workspace.zip
+# Stray duplicate of the root build_config.yaml; runtime uses the root one
+ffmpeg_builder/build_config.yaml
+# Local planning notes
+build-ffmpeg-plan.txt
