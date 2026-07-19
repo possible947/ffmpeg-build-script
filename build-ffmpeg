@@ -10,8 +10,9 @@ SCRIPT_VERSION=1.59
 CWD=$(pwd)
 PACKAGES="$CWD/packages"
 WORKSPACE="$CWD/workspace"
-CFLAGS="-I$WORKSPACE/include -Wno-int-conversion"
-LDFLAGS="-L$WORKSPACE/lib"
+CFLAGS="-I$WORKSPACE/include -Wno-int-conversion -std=gnu17 -Wno-discarded-qualifiers -Wno-unused-value -Wno-dangling-pointer"
+CXXFLAGS="-std=gnu++17 -Wno-unused-value -Wno-dangling-pointer"
+LDFLAGS="-L$WORKSPACE/lib -L$WORKSPACE/lib64"
 LDEXEFLAGS=""
 EXTRALIBS="-ldl -lpthread -lm -lz"
 MACOS_SILICON=false
@@ -427,6 +428,16 @@ fi
 
 echo "Using $MJOBS make jobs simultaneously."
 
+# Use GCC 15 if available (Fedora 44+ ships GCC 16 which has compatibility issues with older code)
+if command -v gcc-15 >/dev/null 2>&1 && command -v g++-15 >/dev/null 2>&1; then
+  echo "Using GCC 15 for better compatibility with older packages"
+  export CC=gcc-15
+  export CXX=g++-15
+else
+  echo "Warning: GCC 15 not found. Using default compiler (GCC $(gcc -dumpversion))."
+  echo "         Install GCC 15 with: sudo dnf install gcc15 gcc15-c++"
+fi
+
 if $NONFREE_AND_GPL; then
   echo "With GPL and non-free codecs"
 fi
@@ -446,7 +457,7 @@ mkdir -p "$PACKAGES"
 mkdir -p "$WORKSPACE"
 
 export PATH="${WORKSPACE}/bin:$PATH"
-PKG_CONFIG_PATH="$WORKSPACE/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig"
+PKG_CONFIG_PATH="$WORKSPACE/lib/pkgconfig:$WORKSPACE/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig"
 PKG_CONFIG_PATH+=":/usr/local/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/lib64/pkgconfig"
 
 if [ -n "$VULKAN_SDK" ]; then
@@ -526,17 +537,10 @@ if build "giflib" "5.2.2"; then
   build_done "giflib" $CURRENT_PACKAGE_VERSION
 fi
 
-if build "pkg-config" "0.29.2"; then
-  download "https://pkgconfig.freedesktop.org/releases/pkg-config-$CURRENT_PACKAGE_VERSION.tar.gz"
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-  	CFLAGS+=" -Wno-int-conversion" # pkg-config 0.29.2 has a warning that is treated as an error
-  	CFLAGS+=" -Wno-error=int-conversion"
-  	export CFLAGS
-  fi
-  execute ./configure --silent --prefix="${WORKSPACE}" --with-pc-path="${WORKSPACE}"/lib/pkgconfig --with-internal-glib
-  execute make -j "$MJOBS"
-  execute make install
-  build_done "pkg-config" $CURRENT_PACKAGE_VERSION
+# pkg-config: use system version (Fedora 44+ ships pkg-config 2.5.1 which is newer than 0.29.2)
+if ! command_exists "pkg-config"; then
+  echo "pkg-config not installed. Please install it with: sudo dnf install pkgconf-pkg-config"
+  exit 1
 fi
 
 if build "yasm" "1.3.0"; then
@@ -563,37 +567,14 @@ if build "zlib" "1.3.2"; then
   build_done "zlib" $CURRENT_PACKAGE_VERSION
 fi
 
-if build "m4" "1.4.20"; then
-  download "https://ftpmirror.gnu.org/gnu/m4/m4-$CURRENT_PACKAGE_VERSION.tar.gz"
-  execute ./configure --prefix="${WORKSPACE}"
-  execute make -j "$MJOBS"
-  execute make install
-  build_done "m4" $CURRENT_PACKAGE_VERSION
-fi
-
-if build "autoconf" "2.72"; then
-  download "https://ftpmirror.gnu.org/gnu/autoconf/autoconf-$CURRENT_PACKAGE_VERSION.tar.gz"
-  execute ./configure --prefix="${WORKSPACE}"
-  execute make -j "$MJOBS"
-  execute make install
-  build_done "autoconf" $CURRENT_PACKAGE_VERSION
-fi
-
-if build "automake" "1.18.1"; then
-  download "https://ftpmirror.gnu.org/gnu/automake/automake-$CURRENT_PACKAGE_VERSION.tar.gz"
-  execute ./configure --prefix="${WORKSPACE}"
-  execute make -j "$MJOBS"
-  execute make install
-  build_done "automake" $CURRENT_PACKAGE_VERSION
-fi
-
-if build "libtool" "2.5.4"; then
-  download "https://ftpmirror.gnu.org/libtool/libtool-$CURRENT_PACKAGE_VERSION.tar.gz"
-  execute ./configure --prefix="${WORKSPACE}" --enable-static --disable-shared
-  execute make -j "$MJOBS"
-  execute make install
-  build_done "libtool" $CURRENT_PACKAGE_VERSION
-fi
+# m4, autoconf, automake, libtool: use system versions (Fedora 44+ ships compatible versions)
+# These are only needed as build dependencies, not linked into ffmpeg
+for tool in m4 autoconf automake libtool; do
+  if ! command_exists "$tool"; then
+    echo "$tool not installed. Please install it with: sudo dnf install $tool"
+    exit 1
+  fi
+done
 
 if $NONFREE_AND_GPL; then
   if build "gettext" "1.0"; then
@@ -641,15 +622,10 @@ else
   fi
 fi
 
-if build "cmake" "4.2.3"; then
-  CXXFLAGS_BACKUP=$CXXFLAGS
-  export CXXFLAGS+=" -std=c++11"
-  download "https://github.com/Kitware/CMake/releases/download/v$CURRENT_PACKAGE_VERSION/cmake-$CURRENT_PACKAGE_VERSION.tar.gz"
-  execute ./configure --prefix="${WORKSPACE}" --parallel="${MJOBS}" -- -DCMAKE_USE_OPENSSL=OFF
-  execute make -j "$MJOBS"
-  execute make install
-  build_done "cmake" $CURRENT_PACKAGE_VERSION
-  export CXXFLAGS=$CXXFLAGS_BACKUP
+# cmake: use system version (Fedora 44+ ships cmake 4.3.0 which is newer than 4.2.3)
+if ! command -v cmake >/dev/null 2>&1; then
+  echo "cmake not installed. Please install it with: sudo dnf install cmake"
+  exit 1
 fi
 
 ##
@@ -817,6 +793,9 @@ if $NONFREE_AND_GPL; then
   if build "x265" "8be7dbf"; then
     download "https://bitbucket.org/multicoreware/x265_git/get/8be7dbf8159ddfceea4115675a6d48e1611b8baa.tar.gz" "x265-8be7dbf.tar.gz"
 
+    # Fix missing <cstdint> include for GCC 15+ compatibility
+    sed -i '23a #include <cstdint>' source/dynamicHDR10/json11/json11.cpp
+
     if $MACOS_SILICON; then
         export CXXFLAGS="-DHAVE_NEON=1 ${CXXFLAGS}"
     fi
@@ -947,6 +926,11 @@ if build "av1" "3.12.0"; then
   download "https://aomedia.googlesource.com/aom/+archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz" "av1-$CURRENT_PACKAGE_VERSION.tar.gz" "av1"
   make_dir "$PACKAGES"/aom_build
   cd "$PACKAGES"/aom_build || exit
+  
+  # Save and clear CXXFLAGS to avoid conflict with AOM's -std=c++11 requirement
+  CXXFLAGS_BACKUP=$CXXFLAGS
+  export CXXFLAGS=""
+  
   if $MACOS_SILICON; then
     execute cmake -DENABLE_TESTS=0 -DENABLE_EXAMPLES=0 -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCONFIG_RUNTIME_CPU_DETECT=0 "$PACKAGES"/av1
   else
@@ -954,6 +938,9 @@ if build "av1" "3.12.0"; then
   fi
   execute make -j "$MJOBS"
   execute make install
+  
+  # Restore CXXFLAGS
+  export CXXFLAGS=$CXXFLAGS_BACKUP
 
   build_done "av1" $CURRENT_PACKAGE_VERSION
 fi
@@ -962,7 +949,7 @@ CONFIGURE_OPTIONS+=("--enable-libaom")
 if build "zimg" "3.0.6"; then
   download "https://github.com/sekrit-twc/zimg/archive/refs/tags/release-$CURRENT_PACKAGE_VERSION.tar.gz" "zimg-$CURRENT_PACKAGE_VERSION.tar.gz" "zimg"
   cd zimg-release-$CURRENT_PACKAGE_VERSION || exit
-  execute "${WORKSPACE}/bin/libtoolize" -i -f -q
+  execute libtoolize -i -f -q
   execute ./autogen.sh --prefix="${WORKSPACE}"
   execute ./configure --prefix="${WORKSPACE}" --enable-static --disable-shared
   execute make -j "$MJOBS"
@@ -1366,7 +1353,7 @@ elif command_exists "python3"; then
   if build "glslang" "16.2.0"; then
     download "https://github.com/KhronosGroup/glslang/archive/refs/tags/$CURRENT_PACKAGE_VERSION.tar.gz" "glslang-$CURRENT_PACKAGE_VERSION.tar.gz"
     execute ./update_glslang_sources.py
-    execute cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" .
+    execute cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib .
     execute make -j "$MJOBS"
     execute make install
     build_done "glslang" $CURRENT_PACKAGE_VERSION
@@ -1468,6 +1455,8 @@ download "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$FFMPEG_VERSION.ta
 # shellcheck disable=SC2086
 
 execute ./configure "${CONFIGURE_OPTIONS[@]}" \
+  --cc=gcc-15 \
+  --cxx=g++-15 \
   --disable-debug \
   --disable-shared \
   --enable-pthreads \
