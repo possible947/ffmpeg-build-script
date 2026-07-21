@@ -237,54 +237,47 @@ class BuildDashboard:
     def __rich__(self) -> RenderableType:
         return self.render()
 
+    def _component_height(self) -> int:
+        """Fixed number of component rows above the anchored messages panel.
+
+        Layout overhead: header panel = 3 lines, messages panel = 10 lines
+        (8 content + 2 borders).
+        """
+        return max(3, self.console.size.height - 13)
+
     def _header(self) -> Panel:
-        total = self._total
-        completed = sum(1 for r in self.rows if r.status == ComponentStatus.COMPLETED)
-        system = sum(1 for r in self.rows if r.status == ComponentStatus.SYSTEM)
-        failed = sum(1 for r in self.rows if r.status == ComponentStatus.FAILED)
-        skipped = sum(1 for r in self.rows if r.status == ComponentStatus.SKIPPED)
-        downloading = sum(1 for r in self.rows if r.status == ComponentStatus.DOWNLOADING)
-        in_progress = sum(1 for r in self.rows if r.status in _IN_PROGRESS)
-        elapsed = datetime.now() - self.started_at
-        elapsed_text = str(elapsed).split(".")[0]
+        """Compact header with title and elapsed time."""
         text = Text()
-        text.append("FFmpeg Builder — Building\n", style="bold blue")
-        text.append(
-            f"FFmpeg {self.ffmpeg_version} · {completed}/{total} complete · "
-            f"{system} system · {failed} failed · {skipped} skip · "
-            f"{in_progress} active · {downloading} downloading\n"
-        )
-        text.append(
-            f"Elapsed {elapsed_text} · Jobs {self.jobs} · Async DL workers {self.download_workers}"
-        )
+        text.append(f"FFmpeg Builder {self.ffmpeg_version} - Building", style="bold blue")
+        elapsed_text = str(datetime.now() - self.started_at).split(".")[0]
+        text.append(f" | Elapsed: {elapsed_text}", style="italic")
         return Panel(text, border_style="blue")
 
-    def _table(self) -> Table:
-        table = Table(show_header=True, expand=True)
-        table.add_column("#", justify="right", no_wrap=True, width=7)
-        table.add_column("Component", overflow="fold")
-        table.add_column("Ver", overflow="fold", width=12)
-        table.add_column("Status", no_wrap=True, width=12)
-        table.add_column("Step", no_wrap=True, width=12)
-        table.add_column("Detail", overflow="fold")
-
-        visible_rows = self._visible_rows()
-        for row in visible_rows:
-            style = _STATUS_STYLES[row.status]
-            table.add_row(
-                f"{row.index}/{row.total}",
-                row.name,
-                row.version,
-                _STATUS_LABELS[row.status],
-                ProgressBar(total=100, completed=row.progress, width=10),
-                row.detail,
-                style=style,
-            )
-        return table
+    def _table(self) -> Group:
+        """Simplified table: one line per component with progress bar and status."""
+        visible = self._visible_rows()
+        height = self._component_height()
+        rendered = []
+        for row in visible:
+            pct = int(row.progress)
+            bar = '█' * (pct // 10) + '-' * ((100 - pct)//10)
+            status_label = _STATUS_LABELS[row.status]
+            txt = (f"{row.index}/{row.total} {row.name:20.20} "
+                   f"{bar} {pct}% [{status_label}] | {row.detail}")
+            rendered.append(Text(txt, style=_STATUS_STYLES[row.status]))
+        # Pad so the component area always has the same height; messages panel stays anchored.
+        for _ in range(height - len(rendered)):
+            rendered.append(Text(""))
+        return Group(*rendered)
 
     def _messages(self) -> Panel:
+        """Fixed-height messages panel (8 content lines) anchored at the bottom."""
         lines = list(self.messages)[-8:]
-        content = "\n".join(lines) if lines else "No messages yet."
+        if not lines:
+            lines = ["No messages yet."]
+        while len(lines) < 8:
+            lines.append("")
+        content = "\n".join(lines)
         return Panel(Text(content), title="Messages", border_style="dim")
 
     def _visible_rows(self) -> List[ComponentRow]:
@@ -297,59 +290,25 @@ class BuildDashboard:
                 visible = [r for r in self.rows if r.first_seen]
             if not visible:
                 return []
-            height = max(3, self.console.size.height - 14)
+            # Fixed layout: header = 3 lines, messages = 10 lines (8 content + 2 borders).
+            # Component list fills the remaining space; messages stay anchored at the bottom.
+            height = self._component_height()
             if len(visible) <= height:
                 return visible
 
-            try:
-                anchor_row = self.rows[self.active_index]
-            except IndexError:
-                anchor_row = visible[-1]
-
-            try:
-                anchor_idx = visible.index(anchor_row)
-            except ValueError:
-                anchor_idx = len(visible) - 1
-
-            window_set: List[ComponentRow] = []
-            seen: Set[int] = set()
-
-            def add(row: ComponentRow) -> bool:
-                if id(row) in seen:
-                    return False
-                if len(window_set) >= height:
-                    return False
-                window_set.append(row)
-                seen.add(id(row))
-                return True
-
-            for row in visible:
-                if row.status in _IN_PROGRESS:
-                    add(row)
-
-            if len(window_set) >= height:
-                return window_set[:height]
-
-            capacity = height - len(window_set)
-            half = capacity // 2
-            start = max(0, anchor_idx - half)
-            end = min(len(visible), start + capacity)
-            start = max(0, end - capacity)
-            for row in visible[start:end]:
-                add(row)
-
-            if len(window_set) >= height:
-                return window_set[:height]
-
-            capacity = height - len(window_set)
-            for offset in range(1, len(visible)):
-                for sign in (-1, 1):
-                    idx = anchor_idx + sign * offset
-                    if 0 <= idx < len(visible):
-                        if add(visible[idx]):
-                            if len(window_set) >= height:
-                                return window_set[:height]
-                if len(window_set) >= height:
+            anchor_idx = 0
+            for i, row in enumerate(visible):
+                if row.index - 1 == self.active_index:
+                    anchor_idx = i
                     break
+            else:
+                if 0 <= self.active_index < len(self.rows):
+                    anchor_idx = min(self.active_index, len(visible) - 1)
+                else:
+                    anchor_idx = len(visible) - 1
 
-            return window_set[:height]
+            half = height // 2
+            start = max(0, anchor_idx - half)
+            end = min(len(visible), start + height)
+            start = max(0, end - height)
+            return visible[start:end]

@@ -20,8 +20,14 @@ All notable changes to the FFmpeg Builder project.
 
 - **Async source downloads** — Source archives are now downloaded in a background thread pool while the previous component is being built. The build loop only blocks on the download for the component it is about to assemble, so network I/O and CPU compilation overlap. New `BuildConfig` fields control the feature: `async_downloads: bool` (default `true`) and `download_workers: int` (default `4`). Both `build_config.yaml` and `profiles/default.yaml` are updated. The interactive `ConfigScreen` exposes the new settings alongside the existing build flags. Implemented as `AsyncDownloadManager` in `ffmpeg_builder/downloader.py`; the per-file lock in `Downloader` and atomic `<archive>.part → <archive>` rename make the background downloads safe to share with the rest of the system. `FFmpegBuilder` gains `prefetch_downloads()`, `retry_download()`, and `shutdown_downloads()`, and the build loop in `app.py` now prefetches all buildable archives up-front, re-queues a download on retry, and stops the executor in a `finally` block on abort/error
 
+### Changed
+
+- **Build dashboard layout** — The header is now a single line (`FFmpeg Builder X.Y - Building | Elapsed: HH:MM:SS`) instead of a multi-line panel. The messages panel is fixed at 8 content lines (10 lines including borders) and stays anchored at the bottom of the screen. The component list occupies the remaining fixed-height area and scrolls upward as new rows appear, so the messages panel is never pushed down by a growing table
+- **Viewport follows build order** — The visible component rows are now centered on the active component in the original build order (`1/N`, `2/N`, …) rather than being reordered to pin in-progress rows at the top. This keeps the progression readable while still making the active phase visible
+
 ### Fixed
 
+- **Syntax errors in `BuildDashboard`** — Incorrect indentation in `_header` and `_visible_rows`, and an inverted guard in the `add` helper, prevented the application from starting. The dashboard now compiles and renders correctly
 - **`build_libvmaf` skipped `BUILDING` phase** — The status went straight from `configuring` to `installing` between `meson setup` and `ninja -C build`, so the dashboard showed `install` while the long compile was actually running. Now the `BUILDING` status is set after configure succeeds, with detail `ninja -C build`
 
 - **`build_libzmq` skipped `BUILDING` phase** — Same issue as `build_libvmaf`: the status jumped from `configuring` to `installing` between `./configure` and `make`. `BUILDING` is now set with detail `make -jN`
