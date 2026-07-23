@@ -1181,9 +1181,27 @@ class FFmpegBuilder:
         shutil.move(str(lib_main), str(lib_main_renamed))
 
         if self.platform == "darwin":
-            libtool = "glibtool" if shutil.which("glibtool") else "libtool"
+            # x265 multi-bitdepth merge on macOS requires Apple libtool.
+            # GNU libtool (glibtool) fails for this static archive merge.
+            libtool = "libtool"
+            if shutil.which("xcrun"):
+                import subprocess
+                xcrun_result = subprocess.run(
+                    ["xcrun", "-f", "libtool"],
+                    capture_output=True,
+                    text=True,
+                )
+                if xcrun_result.returncode == 0:
+                    resolved = xcrun_result.stdout.strip()
+                    if resolved:
+                        libtool = resolved
+            elif Path("/usr/bin/libtool").exists():
+                libtool = "/usr/bin/libtool"
+            if libtool == "libtool" and Path("/usr/bin/libtool").exists():
+                libtool = "/usr/bin/libtool"
+
             result, log_file = self.executor.execute_with_log(
-                [libtool, "-static", "-o", str(lib_main), str(lib_main_renamed), str(lib_main10), str(lib_main12)],
+                [libtool, "-static", "-o", "libx265.a", "libx265_main.a", "libx265_main10.a", "libx265_main12.a"],
                 component.name,
                 "merge-libs",
                 eight_dir,
@@ -1306,14 +1324,17 @@ class FFmpegBuilder:
 
         env = self.get_build_env(component)
 
-        # Use workspace libtoolize if available, otherwise fall back to system
-        libtoolize = f"{self.workspace}/bin/libtoolize"
-        if not Path(libtoolize).exists():
-            system_libtoolize = shutil.which("libtoolize")
-            if system_libtoolize:
-                libtoolize = system_libtoolize
-            else:
-                raise BuildError(component.name, "libtoolize not found")
+        # Use workspace GNU libtoolize first. On macOS it is commonly
+        # installed as `glibtoolize` (Homebrew/MacPorts naming).
+        candidates = [
+            str(self.workspace / "bin" / "libtoolize"),
+            str(self.workspace / "bin" / "glibtoolize"),
+            shutil.which("libtoolize") or "",
+            shutil.which("glibtoolize") or "",
+        ]
+        libtoolize = next((c for c in candidates if c and Path(c).exists()), None)
+        if libtoolize is None:
+            raise BuildError(component.name, "libtoolize not found (tried libtoolize and glibtoolize)")
 
         result, log_file = self.executor.execute_with_log(
             [libtoolize, "-i", "-f", "-q"],
@@ -1467,6 +1488,22 @@ class FFmpegBuilder:
             source_dir: Source directory.
         """
         env = self.get_build_env(component)
+
+        # On some macOS setups `realpath` is missing, while libjxl's deps.sh
+        # assumes it exists. Patch the script to a portable path resolution.
+        deps_script = source_dir / "deps.sh"
+        if self.platform == "darwin" and deps_script.exists() and shutil.which("realpath") is None:
+            content = deps_script.read_text()
+            original = 'SELF=$(realpath "$0")'
+            if original in content:
+                portable = (
+                    'if command -v realpath >/dev/null 2>&1; then\n'
+                    '  SELF=$(realpath "$0")\n'
+                    'else\n'
+                    '  SELF=$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")\n'
+                    'fi'
+                )
+                deps_script.write_text(content.replace(original, portable, 1))
 
         result, log_file = self.executor.execute_with_log(
             ["./deps.sh"],

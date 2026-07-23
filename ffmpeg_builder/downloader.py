@@ -3,7 +3,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import requests
 from tqdm import tqdm
@@ -60,10 +60,22 @@ class Downloader:
             if target_path.exists() and target_path.stat().st_size > 0:
                 return target_path
 
+            candidate_urls = self._candidate_urls(url)
+
             for attempt in range(max_retries):
+                last_error: Optional[Exception] = None
                 try:
-                    self._download_file(url, target_path, show_progress, progress_cb)
-                    return target_path
+                    for candidate_url in candidate_urls:
+                        try:
+                            self._download_file(candidate_url, target_path, show_progress, progress_cb)
+                            return target_path
+                        except Exception as candidate_error:
+                            last_error = candidate_error
+                            part_path = target_path.with_name(f"{target_path.name}.part")
+                            if part_path.exists():
+                                part_path.unlink()
+                    if last_error is not None:
+                        raise last_error
                 except Exception as e:
                     part_path = target_path.with_name(f"{target_path.name}.part")
                     if part_path.exists():
@@ -79,6 +91,24 @@ class Downloader:
                         )
 
             raise RuntimeError(f"Failed to download {url}")
+
+    @staticmethod
+    def _candidate_urls(url: str) -> List[str]:
+        """Build a prioritized list of candidate URLs for one artifact.
+
+        Keeps the original HTTPS URL first and adds Xiph/OSUOSL HTTP fallbacks
+        for environments where TLS chain verification fails on that mirror.
+        """
+        candidates = [url]
+
+        if url.startswith("https://ftp.osuosl.org/"):
+            candidates.append("http://ftp.osuosl.org/" + url[len("https://ftp.osuosl.org/"):])
+
+        if url.startswith("https://downloads.xiph.org/releases/"):
+            rel_path = url.split("/releases/", 1)[1]
+            candidates.append(f"http://ftp.osuosl.org/pub/xiph/releases/{rel_path}")
+
+        return candidates
 
     def _get_lock(self, filename: str) -> threading.Lock:
         with self._locks_guard:

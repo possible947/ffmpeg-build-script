@@ -27,6 +27,11 @@ All notable changes to the FFmpeg Builder project.
 
 ### Fixed
 
+- **macOS x265 merge step** — Multi-bitdepth static archive merge now explicitly uses Apple `libtool` (`xcrun -f libtool` / `/usr/bin/libtool` fallback) instead of GNU `glibtool`, which caused `x265: Merge libs failed` on macOS
+- **zimg bootstrap tool detection on macOS** — `build_zimg()` now accepts both `libtoolize` and `glibtoolize` (workspace and system locations). This fixes `libtoolize not found` failures on Homebrew/MacPorts setups where GNU libtool is exposed as `glibtoolize`
+- **libjxl deps script on macOS without `realpath`** — `build_libjxl()` now patches `deps.sh` to a portable self-path resolution when `realpath` is unavailable, fixing `libjxl: Deps failed` with `./deps.sh: line 12: realpath: command not found`
+- **Xiph mirror download fallback** — Downloader now retries Xiph/OSUOSL archives through HTTP fallback URLs when HTTPS mirror TLS chain validation fails. This stabilizes fetches for `opus`, `libogg`, `libvorbis`, and `libtheora` in affected environments
+
 - **Syntax errors in `BuildDashboard`** — Incorrect indentation in `_header` and `_visible_rows`, and an inverted guard in the `add` helper, prevented the application from starting. The dashboard now compiles and renders correctly
 - **`build_libvmaf` skipped `BUILDING` phase** — The status went straight from `configuring` to `installing` between `meson setup` and `ninja -C build`, so the dashboard showed `install` while the long compile was actually running. Now the `BUILDING` status is set after configure succeeds, with detail `ninja -C build`
 
