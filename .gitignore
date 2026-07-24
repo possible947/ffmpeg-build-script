@@ -12,6 +12,7 @@ __pycache__/
 dist/
 build/
 .venv/
+scripts/env_windows_msys2_ucrt64.sh
 *.egg
 .mypy_cache/
 .pytest_cache/

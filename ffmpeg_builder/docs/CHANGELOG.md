@@ -6,6 +6,10 @@ All notable changes to the FFmpeg Builder project.
 
 ### Added
 
+- **Windows UCRT64 bootstrap script** — Added `scripts/setup_windows_msys2_ucrt64.ps1` to prepare the full Windows 11 + MSYS2 UCRT64 build environment for `ffmpeg_builder`: validates active UCRT64 toolchain, installs required build tooling, installs Python runtime dependencies from MSYS2 packages, creates/repairs `.venv-msys2-ucrt64`, runs `check_python_env.sh`, detects CUDA/Vulkan/OpenCL, and generates `scripts/env_windows_msys2_ucrt64.sh`
+- **Windows acceleration package baseline** — Bootstrap now installs FFmpeg hardware acceleration dependencies for Windows builds: `ffnvcodec-headers` (NVIDIA), `libvpl` (Intel QSV/oneVPL), Vulkan headers/loader/validation stack, OpenCL headers/ICD loader, and shader toolchain packages (`shaderc`, `glslang`)
+- **OpenMP package on Windows bootstrap** — Added `mingw-w64-ucrt-x86_64-llvm-openmp` to keep OpenMP runtime available in UCRT64 environments (useful for GCC/Clang parity with Linux/macOS OpenMP-enabled workflows)
+
 - **Package-manager style TUI** — Replaced the single-component progress screen with a live dashboard showing all buildable components, their statuses, and a service message log. The start screen now uses letter hotkeys (`b`/`r`/`c`/`w`/`i`/`q` + Enter) and a new `InfoScreen` displays the full component list with pagination. Component statuses are now driven by real builder phases: `pending`, `system`, `downloading`, `config`, `build`, `install`, `complete`, `fail`, `skip`. Added `ComponentStatus.SYSTEM` for components available on the host. The `BUILDING` status is now set after configure succeeds in all build paths (autotools, cmake, meson, make-only, cargo, custom). Download callbacks update the dashboard without tqdm interference. Error handler uses letter keys (`r`/`s`/`a`/`l`). All UI strings are in English.
 
 - **Incremental dashboard rows** — `BuildDashboard` rows now appear in the table only after a component receives its first status update. On a fresh build the table grows as the async download pool queues each archive; on resume the rows restored from `state.components` are revealed immediately so prior progress is visible from the first frame. The viewport pins in-progress rows (downloading / configuring / building / installing) so the user always sees what is currently happening even when the table is taller than the terminal
@@ -22,11 +26,16 @@ All notable changes to the FFmpeg Builder project.
 
 ### Changed
 
+- **Windows documentation scope** — Expanded Windows docs with a dedicated implementation plan (`ffmpeg_builder/docs/Windows-UCRT64-Implementation-Plan.md`) and fixed hardware target requirements for Windows adaptation (dual GPU: NVIDIA Titan V + Intel Arc A750; required CUDA/NVENC+NVDEC, Intel QSV/oneVPL, Vulkan, OpenCL)
 - **Build dashboard layout** — The header is now a single line (`FFmpeg Builder X.Y - Building | Elapsed: HH:MM:SS`) instead of a multi-line panel. The messages panel is fixed at 8 content lines (10 lines including borders) and stays anchored at the bottom of the screen. The component list occupies the remaining fixed-height area and scrolls upward as new rows appear, so the messages panel is never pushed down by a growing table
 - **Viewport follows build order** — The visible component rows are now centered on the active component in the original build order (`1/N`, `2/N`, …) rather than being reordered to pin in-progress rows at the top. This keeps the progression readable while still making the active phase visible
 
 ### Fixed
 
+- **MSYS2 toolchain activation in bootstrap** — `setup_windows_msys2_ucrt64.ps1` now forces UCRT64 shell initialization (`MSYSTEM=UCRT64` + `/etc/profile`) before running commands. This prevents accidental use of `/usr/bin/gcc` (Cygwin target) and ensures `/ucrt64/bin/gcc` is used for package installs and Python builds
+- **`psutil` installation failure in UCRT64 venv** — Switched bootstrap Python dependency strategy to MSYS2 runtime packages + `pip install -e . --no-deps`, avoiding local `psutil` wheel builds that fail against current Python 3.14/UCRT64 headers
+- **MSYS2 venv visibility of system packages** — `.venv-msys2-ucrt64` is now created with `--system-site-packages` and its `pyvenv.cfg` is repaired to `include-system-site-packages = true`, so `check_python_env.sh` correctly detects dependencies installed via MSYS2 package manager
+- **Transient pacman network failures during bootstrap** — Added retry wrapper for package installation phase to reduce setup failures from temporary mirror/download timeouts
 - **macOS x265 merge step** — Multi-bitdepth static archive merge now explicitly uses Apple `libtool` (`xcrun -f libtool` / `/usr/bin/libtool` fallback) instead of GNU `glibtool`, which caused `x265: Merge libs failed` on macOS
 - **zimg bootstrap tool detection on macOS** — `build_zimg()` now accepts both `libtoolize` and `glibtoolize` (workspace and system locations). This fixes `libtoolize not found` failures on Homebrew/MacPorts setups where GNU libtool is exposed as `glibtoolize`
 - **libjxl deps script on macOS without `realpath`** — `build_libjxl()` now patches `deps.sh` to a portable self-path resolution when `realpath` is unavailable, fixing `libjxl: Deps failed` with `./deps.sh: line 12: realpath: command not found`

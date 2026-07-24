@@ -1,6 +1,6 @@
 # FFmpeg Builder
 
-Interactive Python-based build system for FFmpeg 8.1 on macOS and Linux.
+Interactive Python-based build system for FFmpeg 8.1 on macOS and Linux, with a prepared bootstrap path for Windows 11 + MSYS2 UCRT64.
 
 FFmpeg Builder replaces the traditional bash `build-ffmpeg` script with a modern, interactive interface featuring real-time progress tracking, configuration management, platform-aware hardware acceleration detection, and resumable builds.
 
@@ -60,6 +60,44 @@ Or use the environment check script:
 ```bash
 ./scripts/check_python_env.sh
 ```
+
+## Windows 11 + MSYS2 UCRT64 (bootstrap)
+
+Windows support for the same `ffmpeg_builder` program is prepared through an MSYS2 UCRT64 bootstrap flow.
+The Windows adaptation target is dual-GPU acceleration (NVIDIA + Intel) with CUDA filters, Vulkan, and OpenCL in one FFmpeg 8.1 build.
+
+From Windows PowerShell (repository root):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows_msys2_ucrt64.ps1
+```
+
+What it does:
+
+- installs required MSYS2/UCRT64 toolchain and build packages,
+- installs hardware acceleration dependency packages (ffnvcodec, oneVPL/libvpl, Vulkan, OpenCL),
+- installs OpenMP runtime support package (`mingw-w64-ucrt-x86_64-llvm-openmp`),
+- installs Python runtime dependencies (`rich`, `tqdm`, `pyyaml`, `requests`, `packaging`, `psutil`) from MSYS2 packages,
+- creates `.venv-msys2-ucrt64` in the repository (with `--system-site-packages`) if missing,
+- installs project package in editable mode (`pip install -e . --no-deps`) into that venv,
+- runs `scripts/check_python_env.sh`,
+- detects CUDA/Vulkan/OpenCL availability and generates `scripts/env_windows_msys2_ucrt64.sh`.
+
+Then start MSYS2 UCRT64 and run:
+
+```bash
+cd /<drive>/<path>/ffmpeg-build-script
+source ./scripts/env_windows_msys2_ucrt64.sh   # optional, if generated
+source ./.venv-msys2-ucrt64/bin/activate
+python -m ffmpeg_builder
+```
+
+OpenMP on Windows/UCRT64 is recommended: it improves performance in components that use OpenMP-parallel code paths.  
+For GCC builds, `-fopenmp` is provided by the installed UCRT64 toolchain (`libgomp` via GCC). The bootstrap additionally installs `llvm-openmp` to keep Clang/OpenMP runtime available as well.
+
+Implementation details and migration plan are documented in:
+
+- `ffmpeg_builder/docs/Windows-UCRT64-Implementation-Plan.md`
 
 ## Quick Start
 

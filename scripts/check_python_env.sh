@@ -10,6 +10,7 @@
 #   3. Version compliance (>= minimum)
 #   4. Virtual environment status
 #   5. Installation commands for missing packages (pip / apt / dnf / port / pacman / zypper)
+#   6. MSYS2 detection and Windows bootstrap hint
 
 set -o pipefail
 
@@ -117,6 +118,8 @@ PYTHON_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
 
 OS=$(uname -s)
 DISTRO="unknown"; PKG_MGR="unknown"
+IS_MSYS2="no"
+MSYS2_MINGW_PREFIX=""
 
 if [[ "$OS" == "Darwin" ]]; then
     DISTRO="macos"
@@ -130,6 +133,19 @@ elif [[ "$OS" == "Linux" ]]; then
     elif command -v pacman &>/dev/null; then PKG_MGR="pacman"
     elif command -v zypper &>/dev/null; then PKG_MGR="zypper"
     fi
+elif [[ "$OS" == MINGW* || "$OS" == MSYS* || "$OS" == CYGWIN* || -n "${MSYSTEM:-}" ]]; then
+    DISTRO="msys2"
+    PKG_MGR="pacman"
+    IS_MSYS2="yes"
+
+    case "${MSYSTEM:-UCRT64}" in
+        UCRT64)  MSYS2_MINGW_PREFIX="mingw-w64-ucrt-x86_64" ;;
+        CLANG64) MSYS2_MINGW_PREFIX="mingw-w64-clang-x86_64" ;;
+        MINGW64) MSYS2_MINGW_PREFIX="mingw-w64-x86_64" ;;
+        *)
+            MSYS2_MINGW_PREFIX="mingw-w64-ucrt-x86_64"
+            ;;
+    esac
 fi
 
 # ── 3. Detect extras ─────────────────────────────────────────────────────────
@@ -168,6 +184,9 @@ printf "\n  ${BOLD}Platform${NC}\n"
 printf "    %-14s %s\n" "OS:" "$OS"
 printf "    %-14s %s\n" "Distribution:" "$DISTRO"
 printf "    %-14s %s\n" "Package mgr:" "$PKG_MGR"
+if [[ "$IS_MSYS2" == "yes" ]]; then
+    printf "    %-14s %s\n" "MSYSTEM:" "${MSYSTEM:-unknown}"
+fi
 
 # ── Environment ──
 printf "\n  ${BOLD}Environment${NC}\n"
@@ -308,9 +327,22 @@ if (( ${#MISSING[@]} > 0 || ${#UNMET[@]} > 0 )); then
         printf "${col}${G}sudo dnf install %s${NC}\n" "${DNF_NAMES[*]}"
     fi
 
-    if [[ "$PKG_MGR" == "pacman" ]]; then
+    if [[ "$PKG_MGR" == "pacman" && "$IS_MSYS2" != "yes" ]]; then
         printf "\n${col}${DIM}# pacman (Arch)${NC}\n"
         printf "${col}${G}sudo pacman -S %s${NC}\n" "${PACMAN_NAMES[*]}"
+    fi
+
+    if [[ "$IS_MSYS2" == "yes" ]]; then
+        MSYS2_PY_PKGS=()
+        for pkg in "${PACMAN_NAMES[@]}"; do
+            MSYS2_PY_PKGS+=("${MSYS2_MINGW_PREFIX}-${pkg}")
+        done
+
+        printf "\n${col}${DIM}# pacman (MSYS2 ${MSYSTEM:-UCRT64})${NC}\n"
+        printf "${col}${G}pacman -S --needed %s${NC}\n" "${MSYS2_PY_PKGS[*]}"
+
+        printf "\n${col}${DIM}# Full Windows + MSYS2 UCRT64 environment bootstrap${NC}\n"
+        printf "${col}${G}powershell -ExecutionPolicy Bypass -File scripts\\setup_windows_msys2_ucrt64.ps1${NC}\n"
     fi
 
     if [[ "$PKG_MGR" == "zypper" ]]; then
